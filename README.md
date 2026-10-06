@@ -7,7 +7,10 @@ dmvs_js DMOD library module.
 
 ## Description
 
-TODO: describe what this module does.
+This repository currently contains a DMOD module scaffold. A JavaScript-to-DMVS
+compiler interface is proposed in [the API design](docs/proposals/api-proposal.md),
+with a [review-only C header](docs/proposals/dmvs_js_proposed.h). The compiler
+is not implemented yet; the API below is the existing scaffold.
 
 ## Building
 
