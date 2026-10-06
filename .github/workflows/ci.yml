@@ -7,8 +7,8 @@ on:
     branches: [ main, master, develop ]
 
 jobs:
-  build:
-    name: Build
+  build-and-test:
+    name: Build and Test
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -31,5 +31,10 @@ jobs:
           echo "Checking for module files..."
           ls -lh build/dmf/
           test -f build/dmf/dmvs_js.dmf
+          test -f build/dmf/test_dmvs_js.dmf
           test -f build/dmf/dmvs_js_version.txt
           echo "Module files present"
+
+      - name: Run tests
+        # API placeholders are explicitly disabled in CTest until implemented.
+        run: ctest --test-dir build --output-on-failure

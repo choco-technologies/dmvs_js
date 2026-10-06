@@ -22,6 +22,15 @@ cmake --build build
 Omit `DMOD_DIR` to fetch dmod from GitHub. The module currently contains only
 DMOD lifecycle hooks; it does not export implementations of the compiler API.
 
+## Tests
+
+```bash
+ctest --test-dir build --output-on-failure
+```
+
+The API test stubs are built but disabled in CTest until implemented. Running
+the test module directly reports explicit TODO failures, not passing tests.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

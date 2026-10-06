@@ -71,3 +71,6 @@ target_include_directories(${DMOD_MODULE_NAME} PRIVATE
 target_include_directories(${DMOD_MODULE_NAME}_if INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
+
+enable_testing()
+add_subdirectory(tests)
