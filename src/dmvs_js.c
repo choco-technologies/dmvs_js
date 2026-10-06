@@ -1,6 +1,6 @@
 #define DMOD_ENABLE_REGISTRATION ON
 #include "dmod.h"
-#include "dmvs_js.h"
+#include "dmvs_js_scaffold.h"
 
 /* Example internal state - replace with your module's real fields. */
 struct dmvs_js

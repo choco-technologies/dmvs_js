@@ -1,6 +1,6 @@
 #define DMOD_ENABLE_REGISTRATION ON
 #include "dmod_test.h"
-#include "dmvs_js.h"
+#include "dmvs_js_scaffold.h"
 
 static dmvs_js_t g_handle = NULL;
 

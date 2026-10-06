@@ -4,9 +4,7 @@ Welcome to the dmvs_js module documentation.
 
 ## Contents
 
-- **[Compiler API proposal](proposals/api-proposal.md)** - Proposed interface, DOM integration and embedded constraints (not implemented)
-
-- **[api-reference.md](api-reference.md)** - Complete API documentation
+- **[api-reference.md](api-reference.md)** - Public compiler API, DOM integration and embedded constraints
 
 ## Quick Reference
 

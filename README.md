@@ -7,10 +7,12 @@ dmvs_js DMOD library module.
 
 ## Description
 
-This repository currently contains a DMOD module scaffold. A JavaScript-to-DMVS
-compiler interface is proposed in [the API design](docs/proposals/api-proposal.md),
-with a [review-only C header](docs/proposals/dmvs_js_proposed.h). The compiler
-is not implemented yet; the API below is the existing scaffold.
+Public API for compiling a supported subset of JavaScript to a typed program
+that integrates with `dmvs_html` and can be lowered to DMVS.
+
+The compiler types and function declarations are in
+[include/dmvs_js.h](include/dmvs_js.h). **Compiler implementation is pending.**
+The module currently implements only the original scaffold lifecycle.
 
 ## Building
 
@@ -34,7 +36,8 @@ make DMOD_MODE=DMOD_MODULE DMOD_DIR=/path/to/dmod
 
 ## Testing
 
-Tests are built automatically alongside the module (see `tests/`). Once built,
+The existing tests cover only the scaffold lifecycle, not the unimplemented
+compiler API. Tests are built alongside the module (see `tests/`). Once built,
 run them with `ctest`:
 
 ```bash
@@ -53,9 +56,7 @@ dmod_loader build/dmf/test_dmvs_js.dmf
 
 ## Usage
 
-<TBD>
-
-This library module provides functions that can be used by other modules:
+Include the public header to use the compiler types and declarations:
 
 ```c
 #include "dmvs_js.h"
@@ -65,6 +66,9 @@ This library module provides functions that can be used by other modules:
 
 | Function | Description |
 |----------|-------------|
+| `dmvs_js_compile()` | Compile sources against a DOM adapter (not implemented). |
+| `dmvs_js_program_view()` | Borrow a compiled program view (not implemented). |
+| `dmvs_js_program_destroy()` | Release a compiled program (not implemented). |
 | `dmvs_js_create()` | Create a new `dmvs_js_t` instance. |
 | `dmvs_js_destroy()` | Destroy an instance created by `_create()`. |
 | `dmvs_js_is_valid()` | Check whether a handle is a valid instance. |
