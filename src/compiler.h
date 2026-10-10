@@ -147,6 +147,22 @@ struct holds
     uint32_t        object;
 };
 
+/*
+ * A function given as a listener or a timer's: compiled when the scripts
+ * have loaded (dmvs_js_finish()) - it runs after they have, and sees what
+ * they made (const x = ... after addEventListener(...)) - into the handler
+ * given out for it now
+ */
+typedef struct deferred deferred_t;
+struct deferred
+{
+    deferred_t*     next;
+    const object_t* fn;
+    value_t         self;
+    dmvsi_handler_t handler;
+    bool            done;
+};
+
 /* A tree the compiler was given: it keeps it (its names, its functions) until it is freed */
 typedef struct program program_t;
 struct program
@@ -181,6 +197,7 @@ struct compiler
     const char*     fractional[MAX_NAMES];
     uint32_t        fractional_count;
     holds_t*        holds;
+    deferred_t*     deferred;
     bool            flushing;           /* In the host's flush() */
     program_t*      programs;           /* Every piece of code seen (the pre-scan looks at all) - the compiler's */
 };

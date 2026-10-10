@@ -20,6 +20,7 @@
 #define MAX_UNROLL      256u            /* Iterations of a loop unrolled at most */
 #define MAX_FUNCTIONS   128u
 #define MAX_RECURSION   2u              /* Copies of a function a recursive call makes */
+#define MAX_INLINE      64u             /* Actions of a function called in its place, not by a CALL */
 
 static value_t expression(compiler_t* c, scope_t* s, const node_t* n);
 static int statement(compiler_t* c, scope_t* s, const node_t* n);
@@ -1255,7 +1256,7 @@ static void function_body(compiler_t* c, scope_t* s, spec_t* sp)
 
 /* A function's handler for these arguments: made, or made now (fresh: not the one being compiled - a recursive call's) */
 static spec_t* specialize(compiler_t* c, const object_t* f, const value_t* self, const value_t* args, uint32_t count,
-                          bool fresh)
+                          bool fresh, dmvsi_handler_t preset)
 {
     for (spec_t* sp = c->specs; sp != NULL; sp = sp->next)
     {
@@ -1269,6 +1270,7 @@ static spec_t* specialize(compiler_t* c, const object_t* f, const value_t* self,
         return NULL;
     }
     sp->fn = f;
+    sp->handler = preset;                           /* Given out before it is compiled: filled when it is */
     sp->self = *self;
     sp->name = (f->node->text != NULL) ? f->node->text : "fn";
     sp->next = c->specs;
@@ -1367,6 +1369,82 @@ static spec_t* specialize(compiler_t* c, const object_t* f, const value_t* self,
     return sp;
 }
 
+/*
+ * A call of a function's handler: its actions in its place when it is small
+ * (dmview's calls are 8 deep) - a return in it a BREAK of a LOOP around it,
+ * unless it is in a loop of its own (then: a CALL)
+ */
+static void call_or_inline(compiler_t* c, dmvsi_handler_t h)
+{
+    const dmvsi_action_t* a = NULL;
+    uint32_t n = dmvsi_handler_actions(c->doc, h, &a);
+    bool inline_it = n > 0 && n <= MAX_INLINE, returns = false;
+    uint32_t loops = 0;
+    for (uint32_t i = 0; i < n && inline_it; i++)
+    {
+        if (a[i].kind == DMVSI_ACT_LOOP)
+            loops++;
+        else if (a[i].kind == DMVSI_ACT_RETURN)
+        {
+            returns = true;
+            inline_it = loops == 0;
+        }
+        else if (a[i].kind == DMVSI_ACT_END && loops > 0)
+        {
+            /* The END of a loop, or of an IF in it: counted back by what it closes */
+            uint32_t depth = 0;
+            for (uint32_t k = i; k-- > 0;)
+            {
+                if (a[k].kind == DMVSI_ACT_END)
+                    depth++;
+                else if (a[k].kind == DMVSI_ACT_LOOP || a[k].kind == DMVSI_ACT_IF_EQ || a[k].kind == DMVSI_ACT_IF_NE ||
+                         (a[k].kind >= DMVSI_ACT_IF_LT && a[k].kind <= DMVSI_ACT_IF_GE))
+                {
+                    if (depth == 0)
+                    {
+                        if (a[k].kind == DMVSI_ACT_LOOP)
+                            loops--;
+                        break;
+                    }
+                    depth--;
+                }
+            }
+        }
+    }
+    dmvsi_action_t x;
+    memset(&x, 0, sizeof(x));
+    if (!inline_it)
+    {
+        x.kind = DMVSI_ACT_CALL;
+        x.handler = h;
+        emit(c, &x);
+        return;
+    }
+    if (returns)
+    {
+        x.kind = DMVSI_ACT_LOOP;
+        emit(c, &x);
+    }
+    for (uint32_t i = 0; i < n; i++)
+    {
+        x = a[i];
+        if (x.kind == DMVSI_ACT_RETURN)
+        {
+            memset(&x, 0, sizeof(x));
+            x.kind = DMVSI_ACT_BREAK;
+        }
+        emit(c, &x);
+    }
+    if (returns)
+    {
+        memset(&x, 0, sizeof(x));
+        x.kind = DMVSI_ACT_BREAK;
+        emit(c, &x);
+        x.kind = DMVSI_ACT_END;
+        emit(c, &x);
+    }
+}
+
 value_t call_value(compiler_t* c, const value_t* callee, const value_t* self, const value_t* args, uint32_t count)
 {
     const object_t* f = as_object(callee, O_FUNCTION);
@@ -1396,7 +1474,7 @@ value_t call_value(compiler_t* c, const value_t* callee, const value_t* self, co
         return v_undefined();
     }
     const node_t* at = c->at;
-    spec_t* sp = specialize(c, f, &me, args, count, depth > 0);
+    spec_t* sp = specialize(c, f, &me, args, count, depth > 0, 0);
     c->at = at;
     if (sp == NULL)
         return v_undefined();
@@ -1412,13 +1490,7 @@ value_t call_value(compiler_t* c, const value_t* callee, const value_t* self, co
         }
     }
     if (sp->handler != 0)
-    {
-        dmvsi_action_t a;
-        memset(&a, 0, sizeof(a));
-        a.kind = DMVSI_ACT_CALL;
-        a.handler = sp->handler;
-        emit(c, &a);
-    }
+        call_or_inline(c, sp->handler);
     if (!sp->returns)
         return v_undefined();
     if (!sp->ret_runtime)
@@ -1444,16 +1516,59 @@ dmvsi_handler_t function_handler(compiler_t* c, const value_t* fn, const value_t
         return 0;
     }
     value_t me = ((f->node->flags & DMVS_JS_F_ARROW) != 0) ? f->self : *self;
-    const node_t* at = c->at;
-    spec_t* sp = specialize(c, f, &me, NULL, 0, false);
-    c->at = at;
-    if (sp == NULL)
+    deferred_t** end = &c->deferred;
+    for (; *end != NULL; end = &(*end)->next)
+    {
+        if ((*end)->fn == f && (*end)->self.kind == me.kind && same_static(&(*end)->self, &me))
+            return (*end)->handler;
+    }
+    deferred_t* d = arena_alloc(&c->arena, sizeof(deferred_t));
+    if (d == NULL)
+    {
+        c->failed = true;
         return 0;
-    if (sp->handler == 0 && sp->compiling)
-        sp->handler = dmvsi_new_handler(c->doc);                    /* Itself (setTimeout(tick)): made when it is done */
-    else if (sp->handler == 0)
-        sp->handler = dmvsi_add_handler(c->doc, NULL, 0);           /* Nothing to do, but a handler */
-    return sp->handler;
+    }
+    d->fn = f;
+    d->self = me;
+    d->handler = dmvsi_new_handler(c->doc);
+    if (d->handler == 0)
+    {
+        c->failed = true;
+        return 0;
+    }
+    *end = d;
+    return d->handler;
+}
+
+/* The listeners' and timers' functions, as the scripts left everything: into the handlers given out */
+static int compile_deferred(compiler_t* c)
+{
+    for (deferred_t* d = c->deferred; d != NULL; d = d->next)    /* (compiling one may add more) */
+    {
+        if (d->done)
+            continue;
+        d->done = true;
+        c->code = &c->init;
+        c->at = d->fn->node;
+        spec_t* sp = specialize(c, d->fn, &d->self, NULL, 0, false, d->handler);
+        if (sp == NULL)
+            return -ENOMEM;
+        if (sp->handler == d->handler)
+        {
+            if (sp->handler != 0 && !sp->done)
+                (void)dmvsi_set_handler(c->doc, d->handler, NULL, 0);
+            continue;
+        }
+        /* Made before (called directly too): what it does, in the handler given out */
+        const dmvsi_action_t* a = NULL;
+        uint32_t n = (sp->handler != 0) ? dmvsi_handler_actions(c->doc, sp->handler, &a) : 0;
+        if (dmvsi_set_handler(c->doc, d->handler, a, n) != 0)
+        {
+            report(c, "a listener the document does not take - not converted");
+            continue;
+        }
+    }
+    return c->failed ? -ENOMEM : 0;
 }
 
 /* ---- Statements ---- */
@@ -2169,9 +2284,11 @@ dmod_dmvs_js_api_declaration(1.0, int, _finish, ( dmvs_js_compiler_t compiler ))
     compiler_t* c = (compiler_t*)compiler;
     if (c == NULL)
         return -EINVAL;
+    int ret = compile_deferred(c);
     c->code = &c->init;
     flush_host(c);
-    int ret = finish_timers(c);
+    if (ret == 0)
+        ret = finish_timers(c);
     if (ret == 0 && c->init.count > 0)
     {
         dmvsi_handler_t h = dmvsi_add_handler(c->doc, c->init.actions, c->init.count);

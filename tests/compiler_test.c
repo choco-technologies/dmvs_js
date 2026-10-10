@@ -465,6 +465,10 @@ static dmvs_js_compiler_t compiler_of(page_t* p, const char* elements)
     return dmvs_js_compiler_new(p->doc, &host);
 }
 
+/* onclick code compiled after the script (its `this`: the first element) */
+static dmvs_js_ast_t g_handler_code;
+static dmvsi_handler_t g_handler;
+
 /* The page: its scripts compiled, its variables as they start, the init handler run */
 static bool load(page_t* p, dmvs_js_compiler_t c, const char* script)
 {
@@ -476,6 +480,9 @@ static bool load(page_t* p, dmvs_js_compiler_t c, const char* script)
         return false;
     }
     int ret = dmvs_js_compile(c, ast);              /* The compiler's now */
+    if (ret == 0 && g_handler_code != NULL)
+        g_handler = dmvs_js_compile_handler(c, g_handler_code, 1);
+    g_handler_code = NULL;
     if (ret == 0)
         ret = dmvs_js_finish(c);
     make_held(p, c);
@@ -659,8 +666,9 @@ DMOD_TEST_STEP(dmvs_js_compiles_onclick_code)
     dmvs_js_ast_t code = dmvs_js_parse(onclick, strlen(onclick), &e);
     DMOD_TEST_EXPECT_TRUE(code != NULL);
     DMOD_TEST_EXPECT_EQ(dmvs_js_scan(c, code), 0);
+    g_handler_code = code;                          /* Compiled with the script, before the end */
     DMOD_TEST_EXPECT_TRUE(load(p, c, "let count = 0;\n"));
-    dmvsi_handler_t h = dmvs_js_compile_handler(c, code, 1);
+    dmvsi_handler_t h = g_handler;
     DMOD_TEST_EXPECT_TRUE(h != 0);
     run(p, h, 0);
     run(p, h, 0);
@@ -754,5 +762,22 @@ DMOD_TEST_STEP(dmvs_js_keeps_elements_in_variables)
     click(p, "next");
     click(p, "next");
     DMOD_TEST_EXPECT_TRUE(shows_is(p, "c", "") && shows_is(p, "a", "here 3"));
+    unload(p, c);
+}
+
+DMOD_TEST_STEP(dmvs_js_compiles_listeners_when_the_scripts_have_loaded)
+{
+    const char* ids = "go=|out=";
+    page_t* p = page();
+    dmvs_js_compiler_t c = compiler_of(p, ids);
+    /* The listener uses what the script makes after it is added: as it runs, after the script */
+    DMOD_TEST_EXPECT_TRUE(load(p, c,
+        "document.getElementById('go').addEventListener('click', () => show());\n"
+        "const out = document.getElementById('out');\n"
+        "const label = 'shown';\n"
+        "function show() { out.innerText = label; }\n"));
+    DMOD_TEST_EXPECT_EQ(p->reports, 0u);
+    click(p, "go");
+    DMOD_TEST_EXPECT_TRUE(shows_is(p, "out", "shown"));
     unload(p, c);
 }

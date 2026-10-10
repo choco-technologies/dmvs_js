@@ -328,7 +328,7 @@ dmod_dmvs_js_api(1.0, int, _scan, ( dmvs_js_compiler_t c, dmvs_js_ast_t code ));
  */
 dmod_dmvs_js_api(1.0, int, _compile, ( dmvs_js_compiler_t c, dmvs_js_ast_t script ));
 
-/** @brief Compile a piece of code as a handler (an onclick="..." attribute), `this` its object - the tree kept. 0 on failure */
+/** @brief Compile a piece of code as a handler (an onclick="..." attribute), `this` its object - the tree kept; made at dmvs_js_finish(). 0 on failure */
 dmod_dmvs_js_api(1.0, dmvsi_handler_t, _compile_handler, ( dmvs_js_compiler_t c, dmvs_js_ast_t code, uint32_t this_object ));
 
 /** @brief The end: the init handler and the timers into the document. @return 0, -ENOMEM */
@@ -361,8 +361,11 @@ dmod_dmvs_js_api(1.0, bool, _truthy, ( const dmvs_js_value_t* v ));
 
 /**
  * @brief A function value as a handler - a listener: run with `this` as
- *        `this_object` (0: undefined) and no arguments.
- * @return The handler, 0 when it is not a function (or not compiled)
+ *        `this_object` (0: undefined) and no arguments. The function is
+ *        compiled at dmvs_js_finish(), when the scripts have loaded (it
+ *        runs after they have: it sees what they made), into the handler
+ *        returned now - so is onclick code (dmvs_js_compile_handler()).
+ * @return The handler, 0 when it is not a function
  */
 dmod_dmvs_js_api(1.0, dmvsi_handler_t, _function_handler, ( dmvs_js_compiler_t c, const dmvs_js_value_t* function, uint32_t this_object ));
 

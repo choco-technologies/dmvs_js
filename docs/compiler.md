@@ -49,7 +49,15 @@ variables of the document.
     call is that value.
   - A recursive call (`a → b → a`) compiles another copy of the function,
     up to two levels deep. Deeper calls are reported.
-  - `setTimeout(tick, 100)` inside `tick` uses the handler being compiled.
+  - A small function (up to 64 actions) is copied in place of its
+    `CALL`, because dmview's calls only nest 8 deep. An early `return`
+    in it becomes a `BREAK` out of a one-pass `LOOP`.
+- **Listeners and timers**: a function given to `addEventListener`,
+  `setTimeout` or `setInterval`, and `onclick` code, gets its handler
+  right away but is compiled at `dmvs_js_finish()`. It runs after the
+  scripts have loaded, so it sees what they made after it was registered
+  (`const x = …` further down). `setTimeout(tick, 100)` inside `tick`
+  gets the same handler.
 - **Timers**: every `setTimeout` / `setInterval` call site has variables
   for whether it is started and when it is due, plus a view timer that
   polls it. The timer runs every 10–50 ms, depending on the call's delay.
