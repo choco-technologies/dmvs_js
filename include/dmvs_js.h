@@ -278,6 +278,12 @@ typedef struct
  * The DOM, by the host. Each returns 0, or -ENOTSUP for what it does not
  * do (the compiler reports it). While it handles get / set / call it may
  * emit actions into the code being compiled (dmvs_js_emit()).
+ *
+ * The object of get / set / call is the host's: a DMVS_JS_V_OBJECT, or a
+ * runtime variable holding one - an integer variable (DMVS_JS_T_NUMBER,
+ * scale 0) set to objects' handles (0: null), `let current = null; ...
+ * current = el`. What it may hold is dmvs_js_object_domain()'s - known
+ * when everything is compiled.
  */
 typedef struct
 {
@@ -285,14 +291,21 @@ typedef struct
     /** A global the compiler does not know (document, window): false when the host has none */
     bool    (*global)(void* ctx, dmvs_js_compiler_t c, const char* name, dmvs_js_value_t* value);
     /** object.name */
-    int     (*get)(void* ctx, dmvs_js_compiler_t c, uint32_t object, const char* name, dmvs_js_value_t* value);
+    int     (*get)(void* ctx, dmvs_js_compiler_t c, const dmvs_js_value_t* object, const char* name, dmvs_js_value_t* value);
     /** object.name = value */
-    int     (*set)(void* ctx, dmvs_js_compiler_t c, uint32_t object, const char* name, const dmvs_js_value_t* value);
+    int     (*set)(void* ctx, dmvs_js_compiler_t c, const dmvs_js_value_t* object, const char* name, const dmvs_js_value_t* value);
     /** object.method(args) */
-    int     (*call)(void* ctx, dmvs_js_compiler_t c, uint32_t object, const char* method, const dmvs_js_value_t* args,
-                    uint32_t count, dmvs_js_value_t* result);
+    int     (*call)(void* ctx, dmvs_js_compiler_t c, const dmvs_js_value_t* object, const char* method,
+                    const dmvs_js_value_t* args, uint32_t count, dmvs_js_value_t* result);
     /** What is not compiled, and where */
     void    (*report)(void* ctx, uint32_t line, uint32_t column, const char* message);
+    /**
+     * Optional: what the host kept back is to be emitted now - before the
+     * code goes another way (an IF, its END, a LOOP, a CALL, a RETURN),
+     * before another function's code is made, at the end of a function's
+     * code (classes changed together: one look). NULL: none.
+     */
+    void    (*flush)(void* ctx, dmvs_js_compiler_t c);
 } dmvs_js_host_t;
 
 /** @brief A compiler of scripts into a document's code (the host copied). NULL on failure */
@@ -352,6 +365,17 @@ dmod_dmvs_js_api(1.0, bool, _truthy, ( const dmvs_js_value_t* v ));
  * @return The handler, 0 when it is not a function (or not compiled)
  */
 dmod_dmvs_js_api(1.0, dmvsi_handler_t, _function_handler, ( dmvs_js_compiler_t c, const dmvs_js_value_t* function, uint32_t this_object ));
+
+/**
+ * @brief The host's objects a variable may hold: every object assigned to
+ *        it (and to the variables assigned to it) - when everything is
+ *        compiled (dmvs_js_finish()). 0 (null) is not one of them.
+ * @return How many (more than `max`: the first `max` in `objects`)
+ */
+dmod_dmvs_js_api(1.0, uint32_t, _object_domain, ( dmvs_js_compiler_t c, dmvsi_var_t var, uint32_t* objects, uint32_t max ));
+
+/** @brief An array of values (the host's elements of a selector, ...). @return 0, -ENOMEM */
+dmod_dmvs_js_api(1.0, int, _array, ( dmvs_js_compiler_t c, const dmvs_js_value_t* values, uint32_t count, dmvs_js_value_t* array ));
 
 /** @brief A static string's number as parseFloat() reads it (NaN: false). */
 dmod_dmvs_js_api(1.0, bool, _parse_number, ( const char* text, size_t length, double* number ));

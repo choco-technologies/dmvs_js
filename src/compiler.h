@@ -137,6 +137,16 @@ typedef struct
     dmvsi_handler_t handler;            /* The callback */
 } site_t;
 
+/* What a variable is set to (its domain: the host's objects it may hold) - an object, or another variable */
+typedef struct holds holds_t;
+struct holds
+{
+    holds_t*        next;
+    dmvsi_var_t     var;
+    dmvsi_var_t     from;               /* 0: `object` */
+    uint32_t        object;
+};
+
 /* A tree the compiler was given: it keeps it (its names, its functions) until it is freed */
 typedef struct program program_t;
 struct program
@@ -170,6 +180,8 @@ struct compiler
     uint32_t        assigned_count;
     const char*     fractional[MAX_NAMES];
     uint32_t        fractional_count;
+    holds_t*        holds;
+    bool            flushing;           /* In the host's flush() */
     program_t*      programs;           /* Every piece of code seen (the pre-scan looks at all) - the compiler's */
 };
 
@@ -206,6 +218,8 @@ value_t         concat(compiler_t* c, const value_t* parts, uint32_t count);
 int             assign_to(compiler_t* c, const value_t* target, const value_t* v);     /* target: RUNTIME */
 uint8_t         number_scale(const value_t* v);
 bool            parse_number(const char* s, size_t n, double* out);
+void            flush_host(compiler_t* c);
+void            track(compiler_t* c, dmvsi_var_t var, const value_t* v);  /* What var is set to: its domain */
 
 /* compile.c */
 value_t         call_value(compiler_t* c, const value_t* callee, const value_t* self, const value_t* args, uint32_t count);

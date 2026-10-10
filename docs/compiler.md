@@ -91,16 +91,33 @@ typedef struct
 {
     void*   ctx;
     bool    (*global)(void* ctx, dmvs_js_compiler_t c, const char* name, dmvs_js_value_t* value);
-    int     (*get)(void* ctx, dmvs_js_compiler_t c, uint32_t object, const char* name, dmvs_js_value_t* value);
-    int     (*set)(void* ctx, dmvs_js_compiler_t c, uint32_t object, const char* name, const dmvs_js_value_t* value);
-    int     (*call)(void* ctx, dmvs_js_compiler_t c, uint32_t object, const char* method,
+    int     (*get)(void* ctx, dmvs_js_compiler_t c, const dmvs_js_value_t* object, const char* name, dmvs_js_value_t* value);
+    int     (*set)(void* ctx, dmvs_js_compiler_t c, const dmvs_js_value_t* object, const char* name,
+                   const dmvs_js_value_t* value);
+    int     (*call)(void* ctx, dmvs_js_compiler_t c, const dmvs_js_value_t* object, const char* method,
                     const dmvs_js_value_t* args, uint32_t count, dmvs_js_value_t* result);
     void    (*report)(void* ctx, uint32_t line, uint32_t column, const char* message);
+    void    (*flush)(void* ctx, dmvs_js_compiler_t c);          /* optional */
 } dmvs_js_host_t;
 ```
 
 - An object is a `DMVS_JS_V_OBJECT` value with the host's handle, for
   example an element returned by `getElementById()`.
+- A variable can hold elements: `let current = null; … current = el`.
+  It is an integer variable set to the handles (0 for null), and
+  `get` / `set` / `call` receive it as a `DMVS_JS_V_RUNTIME` value.
+  `dmvs_js_object_domain(c, var, …)` lists every object it may hold:
+  those assigned to it and to the variables assigned to it. The list is
+  complete after `dmvs_js_finish()`, so the host emits a `CALL` of a
+  handler it reserves (`dmvsi_new_handler()`) and fills that handler at
+  the end with an `IF` for each object.
+- `flush`, if set, is called before the code changes direction (`IF`,
+  `ELSE`, `END`, `LOOP`, `BREAK`, `CONTINUE`, `CALL`, `RETURN`), before
+  another function's code is made, and at the end of a function's code.
+  A host can keep changes back until then, for example classes changed
+  together, which make one look.
+- `dmvs_js_array()` makes an array of values, such as the elements of a
+  `querySelectorAll()`.
 - `get`, `set` and `call` return 0, or `-ENOTSUP` for something the host
   doesn't do (the compiler reports it).
 - While handling one of them, the host may emit actions with

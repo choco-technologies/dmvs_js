@@ -66,10 +66,10 @@ static bool host_global(void* ctx, dmvs_js_compiler_t c, const char* name, dmvs_
     return true;
 }
 
-static int host_get(void* ctx, dmvs_js_compiler_t c, uint32_t object, const char* name, dmvs_js_value_t* value)
+static int host_get(void* ctx, dmvs_js_compiler_t c, const dmvs_js_value_t* object, const char* name, dmvs_js_value_t* value)
 {
     page_t* p = ctx;
-    element_t* e = element(p, object);
+    element_t* e = (object->kind == DMVS_JS_V_OBJECT) ? element(p, object->object) : NULL;
     (void)c;
     if (e == NULL || (strcmp(name, "innerText") != 0 && strcmp(name, "textContent") != 0))
         return -ENOTSUP;
@@ -81,10 +81,85 @@ static int host_get(void* ctx, dmvs_js_compiler_t c, uint32_t object, const char
     return 0;
 }
 
-static int host_set(void* ctx, dmvs_js_compiler_t c, uint32_t object, const char* name, const dmvs_js_value_t* value)
+/*
+ * innerText of an element a variable holds: kept back (flushed as the
+ * compiler asks - the flush hook), then a CALL of a handler made at the end,
+ * an IF per element the variable may hold (dmvs_js_object_domain())
+ */
+typedef struct
+{
+    dmvsi_var_t     holder;
+    dmvsi_var_t     text;               /* What it is set to: a text variable */
+    dmvsi_handler_t handler;
+} held_t;
+
+static held_t g_held[16];
+static uint32_t g_held_count, g_kept, g_flushes;
+
+static int set_held(page_t* p, dmvs_js_compiler_t c, const dmvs_js_value_t* object, const char* name, const dmvs_js_value_t* value)
+{
+    if (strcmp(name, "innerText") != 0 || g_held_count >= 16u)
+        return -ENOTSUP;
+    held_t* h = &g_held[g_held_count++];
+    h->holder = object->var;
+    h->text = dmvsi_add_text_var(p->doc, "held", 64, "");
+    h->handler = dmvsi_new_handler(p->doc);
+    dmvsi_action_t a;
+    memset(&a, 0, sizeof(a));
+    a.kind = DMVSI_ACT_SET;
+    a.var = h->text;
+    if (dmvs_js_text_operand(c, value, &a.operand, &a.text) != 0)
+        return -ENOTSUP;
+    dmvs_js_emit(c, &a);
+    g_kept++;                           /* The CALL: at the flush */
+    return 0;
+}
+
+static void host_flush(void* ctx, dmvs_js_compiler_t c)
+{
+    (void)ctx;
+    g_flushes++;
+    for (; g_kept > 0; g_kept--)
+    {
+        dmvsi_action_t a;
+        memset(&a, 0, sizeof(a));
+        a.kind = DMVSI_ACT_CALL;
+        a.handler = g_held[g_held_count - g_kept].handler;
+        dmvs_js_emit(c, &a);
+    }
+}
+
+/* The handlers of what was set of held elements: an IF for each element */
+static void make_held(page_t* p, dmvs_js_compiler_t c)
+{
+    for (uint32_t i = 0; i < g_held_count; i++)
+    {
+        uint32_t objects[MAX_ELEMENTS];
+        uint32_t n = dmvs_js_object_domain(c, g_held[i].holder, objects, MAX_ELEMENTS);
+        dmvsi_action_t a[3 * MAX_ELEMENTS];
+        uint32_t k = 0;
+        memset(a, 0, sizeof(a));
+        for (uint32_t j = 0; j < n && j < MAX_ELEMENTS; j++)
+        {
+            a[k].kind = DMVSI_ACT_IF_EQ;
+            a[k].var = g_held[i].holder;
+            a[k++].value = (int32_t)objects[j];
+            a[k].kind = DMVSI_ACT_SET;
+            a[k].var = p->elements[objects[j] - 1U].var;
+            a[k++].operand = g_held[i].text;
+            a[k++].kind = DMVSI_ACT_END;
+        }
+        dmvsi_set_handler(p->doc, g_held[i].handler, a, k);
+    }
+    g_held_count = 0;
+}
+
+static int host_set(void* ctx, dmvs_js_compiler_t c, const dmvs_js_value_t* object, const char* name, const dmvs_js_value_t* value)
 {
     page_t* p = ctx;
-    element_t* e = element(p, object);
+    if (object->kind == DMVS_JS_V_RUNTIME)
+        return set_held(p, c, object, name, value);
+    element_t* e = element(p, object->object);
     if (e == NULL || (strcmp(name, "innerText") != 0 && strcmp(name, "textContent") != 0))
         return -ENOTSUP;
     dmvsi_action_t a;
@@ -111,11 +186,24 @@ static int host_set(void* ctx, dmvs_js_compiler_t c, uint32_t object, const char
     return 0;
 }
 
-static int host_call(void* ctx, dmvs_js_compiler_t c, uint32_t object, const char* method, const dmvs_js_value_t* args,
+static int host_call(void* ctx, dmvs_js_compiler_t c, const dmvs_js_value_t* self, const char* method, const dmvs_js_value_t* args,
                      uint32_t count, dmvs_js_value_t* result)
 {
     page_t* p = ctx;
+    uint32_t object = (self->kind == DMVS_JS_V_OBJECT) ? self->object : 0;
     memset(result, 0, sizeof(*result));
+    if (object == DOCUMENT && strcmp(method, "querySelectorAll") == 0)
+    {
+        /* Every element: an array of the host's objects */
+        dmvs_js_value_t all[MAX_ELEMENTS];
+        memset(all, 0, sizeof(all));
+        for (uint32_t i = 0; i < p->count; i++)
+        {
+            all[i].kind = DMVS_JS_V_OBJECT;
+            all[i].object = i + 1U;
+        }
+        return dmvs_js_array(c, all, p->count, result);
+    }
     if (object == DOCUMENT && strcmp(method, "getElementById") == 0 && count == 1 && args[0].kind == DMVS_JS_V_STRING)
     {
         for (uint32_t i = 0; i < p->count; i++)
@@ -371,6 +459,9 @@ static dmvs_js_compiler_t compiler_of(page_t* p, const char* elements)
     host.set = host_set;
     host.call = host_call;
     host.report = host_report;
+    host.flush = host_flush;
+    g_held_count = 0;
+    g_kept = 0;
     return dmvs_js_compiler_new(p->doc, &host);
 }
 
@@ -387,6 +478,7 @@ static bool load(page_t* p, dmvs_js_compiler_t c, const char* script)
     int ret = dmvs_js_compile(c, ast);              /* The compiler's now */
     if (ret == 0)
         ret = dmvs_js_finish(c);
+    make_held(p, c);
     if (ret != 0)
     {
         Dmod_Printf("    compiled: %d\n", ret);
@@ -631,5 +723,36 @@ DMOD_TEST_STEP(dmvs_js_follows_calls_and_timers_that_stop_themselves)
         "let q = 0;\n"
         "for (const x of [1, 2, 3]) { if (q > 1) break; q += x; }\n"));
     DMOD_TEST_EXPECT_EQ(p->reports, 1u);
+    unload(p, c);
+}
+
+DMOD_TEST_STEP(dmvs_js_keeps_elements_in_variables)
+{
+    const char* ids = "a=|b=|c=|next=";
+    page_t* p = page();
+    dmvs_js_compiler_t c = compiler_of(p, ids);
+    g_flushes = 0;
+    DMOD_TEST_EXPECT_TRUE(load(p, c,
+        "const all = document.querySelectorAll('*');\n"
+        "let current = null;\n"
+        "let n = 0;\n"
+        "function show(i) {\n"
+        "  if (current !== null) current.innerText = '';\n"
+        "  current = all[i];\n"
+        "  current.innerText = 'here ' + n;\n"
+        "}\n"
+        "document.getElementById('next').addEventListener('click', () => {\n"
+        "  n++;\n"
+        "  if (current === all[0]) show(1); else if (current === all[1]) show(2); else show(0);\n"
+        "});\n"
+        "show(0);\n"));
+    DMOD_TEST_EXPECT_EQ(p->reports, 0u);
+    DMOD_TEST_EXPECT_TRUE(g_flushes > 0u);
+    DMOD_TEST_EXPECT_TRUE(shows_is(p, "a", "here 0"));
+    click(p, "next");
+    DMOD_TEST_EXPECT_TRUE(shows_is(p, "a", "") && shows_is(p, "b", "here 1"));
+    click(p, "next");
+    click(p, "next");
+    DMOD_TEST_EXPECT_TRUE(shows_is(p, "c", "") && shows_is(p, "a", "here 3"));
     unload(p, c);
 }

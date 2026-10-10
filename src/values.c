@@ -329,8 +329,58 @@ bool parse_number(const char* s, size_t n, double* out)
 
 /* ---- Code ---- */
 
+void flush_host(compiler_t* c)
+{
+    if (c->host.flush == NULL || c->flushing || c->code == NULL)
+        return;
+    c->flushing = true;
+    c->host.flush(c->host.ctx, (dmvs_js_compiler_t)c);
+    c->flushing = false;
+}
+
+/* What makes the code go another way: the host's changes kept back are emitted before it */
+static bool flow_kind(uint8_t kind)
+{
+    switch (kind)
+    {
+        case DMVSI_ACT_IF_EQ: case DMVSI_ACT_IF_NE: case DMVSI_ACT_IF_LT: case DMVSI_ACT_IF_LE:
+        case DMVSI_ACT_IF_GT: case DMVSI_ACT_IF_GE: case DMVSI_ACT_ELSE: case DMVSI_ACT_END:
+        case DMVSI_ACT_LOOP: case DMVSI_ACT_BREAK: case DMVSI_ACT_CONTINUE: case DMVSI_ACT_CALL:
+        case DMVSI_ACT_RETURN:
+            return true;
+        default:
+            return false;
+    }
+}
+
+void track(compiler_t* c, dmvsi_var_t var, const value_t* v)
+{
+    bool object = v->kind == DMVS_JS_V_OBJECT;
+    bool from = v->kind == DMVS_JS_V_RUNTIME && v->type == DMVS_JS_T_NUMBER && v->var != var;
+    if (var == 0 || !(object || from))
+        return;
+    for (const holds_t* h = c->holds; h != NULL; h = h->next)
+    {
+        if (h->var == var && (object ? (h->from == 0 && h->object == v->object) : h->from == v->var))
+            return;
+    }
+    holds_t* h = arena_alloc(&c->arena, sizeof(holds_t));
+    if (h == NULL)
+    {
+        c->failed = true;
+        return;
+    }
+    h->var = var;
+    h->from = object ? 0 : v->var;
+    h->object = object ? v->object : 0;
+    h->next = c->holds;
+    c->holds = h;
+}
+
 int emit(compiler_t* c, const dmvsi_action_t* a)
 {
+    if (flow_kind(a->kind))
+        flush_host(c);
     code_t* k = c->code;
     if (k->count == k->capacity)
     {
@@ -436,6 +486,11 @@ bool number_operand(compiler_t* c, const value_t* v, uint8_t scale, dmvsi_var_t*
     double n;
     *var = 0;
     *imm = 0;
+    if (v->kind == DMVS_JS_V_OBJECT)
+    {
+        *imm = (int32_t)v->object;                  /* The host's object: its handle */
+        return true;
+    }
     if (static_number(v, &n))
     {
         double scaled = n * pow10i(scale);
@@ -760,6 +815,8 @@ int assign_to(compiler_t* c, const value_t* target, const value_t* v)
     value_t b = (target->type == DMVS_JS_T_BOOL) ? to_bool(c, v) : *v;
     dmvsi_var_t var;
     int32_t imm;
+    if (target->type == DMVS_JS_T_NUMBER && target->scale == 0)
+        track(c, target->var, v);
     if (!number_operand(c, &b, target->scale, &var, &imm))
     {
         report(c, "a value of another type than the variable's - not converted");

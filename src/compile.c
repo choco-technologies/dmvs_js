@@ -641,13 +641,22 @@ static value_t select(compiler_t* c, const object_t* sel, const char* property)
     return r;
 }
 
+/* Whether object.name is the host's: its object, or a variable that holds one (an integer, not a number's method) */
+static bool host_object(const value_t* v, const char* name)
+{
+    if (v->kind == DMVS_JS_V_OBJECT)
+        return true;
+    return v->kind == DMVS_JS_V_RUNTIME && v->type == DMVS_JS_T_NUMBER && v->scale == 0 && name != NULL &&
+           strcmp(name, "toFixed") != 0 && strcmp(name, "toString") != 0;
+}
+
 /* object.name - static, the host's, a selection's */
 static value_t member(compiler_t* c, const value_t* object, const char* name)
 {
     value_t out = v_undefined();
-    if (object->kind == DMVS_JS_V_OBJECT)
+    if (host_object(object, name))
     {
-        if (c->host.get == NULL || c->host.get(c->host.ctx, (dmvs_js_compiler_t)c, object->object, name, &out) != 0)
+        if (c->host.get == NULL || c->host.get(c->host.ctx, (dmvs_js_compiler_t)c, object, name, &out) != 0)
         {
             char m[96];
             Dmod_SnPrintf(m, sizeof(m), "the element's %s - not converted", name);
@@ -882,9 +891,9 @@ static value_t assign(compiler_t* c, scope_t* s, const node_t* target, uint8_t o
             v = (op == DMVS_JS_OP_ADD && (is_text(&old) || is_text(&v))) ? concat(c, (value_t[]){ old, v }, 2)
                                                                        : arithmetic(c, op, &old, &v);
         }
-        if (object.kind == DMVS_JS_V_OBJECT)
+        if (host_object(&object, name))
         {
-            if (c->host.set == NULL || c->host.set(c->host.ctx, (dmvs_js_compiler_t)c, object.object, name, &v) != 0)
+            if (c->host.set == NULL || c->host.set(c->host.ctx, (dmvs_js_compiler_t)c, &object, name, &v) != 0)
             {
                 char m[96];
                 Dmod_SnPrintf(m, sizeof(m), "setting the element's %s - not converted", name);
@@ -948,11 +957,11 @@ static value_t call_expression(compiler_t* c, scope_t* s, const node_t* n)
     }
     c->at = n;
 
-    if (method != NULL && self.kind == DMVS_JS_V_OBJECT)
+    if (method != NULL && host_object(&self, method))
     {
         /* The host's method */
         value_t out = v_undefined();
-        if (c->host.call == NULL || c->host.call(c->host.ctx, (dmvs_js_compiler_t)c, self.object, method, args, count, &out) != 0)
+        if (c->host.call == NULL || c->host.call(c->host.ctx, (dmvs_js_compiler_t)c, &self, method, args, count, &out) != 0)
         {
             char m[96];
             Dmod_SnPrintf(m, sizeof(m), "the element's %s() - not converted", method);
@@ -1271,6 +1280,7 @@ static spec_t* specialize(compiler_t* c, const object_t* f, const value_t* self,
     Dmod_SnPrintf(prefix, sizeof(prefix), "%s%u", sp->name, (unsigned)++serial);
     code->prefix = arena_strndup(&c->arena, prefix, strlen(prefix));
     code->spec = sp;
+    flush_host(c);                                  /* The host's changes kept back are the caller's */
     code->outer = c->code;
     c->code = code;
     sp->compiling = true;
@@ -1325,6 +1335,7 @@ static spec_t* specialize(compiler_t* c, const object_t* f, const value_t* self,
     uint32_t loop_depth = c->loop_depth;
     c->loop_depth = 0;                               /* A break in it is not of the loops around the call */
     function_body(c, s, sp);
+    flush_host(c);
     c->loop_depth = loop_depth;
 
     c->code = code->outer;
@@ -1547,7 +1558,7 @@ static int declarations(compiler_t* c, scope_t* s, const node_t* n)
             type = DMVS_JS_T_TEXT;
         else if (v.kind == DMVS_JS_V_BOOL || (v.kind == DMVS_JS_V_RUNTIME && v.type == DMVS_JS_T_BOOL))
             type = DMVS_JS_T_BOOL;
-        else if (v.kind == DMVS_JS_V_OBJECT || v.kind == DMVS_JS_V_INTERNAL)
+        else if (v.kind == DMVS_JS_V_INTERNAL)
         {
             report(c, "a variable that holds an element or an object and changes - not converted");
             bind(c, s, name, &v, false);
@@ -1577,6 +1588,8 @@ static int declarations(compiler_t* c, scope_t* s, const node_t* n)
             }
         }
         value_t var = v_runtime(type, scale, new_var(c, name, type, initial, text));
+        if (initialized && type == DMVS_JS_T_NUMBER && scale == 0)
+            track(c, var.var, &v);                  /* let current = home: what it may hold */
         if (!initialized && v.kind != DMVS_JS_V_UNDEFINED)
             assign_to(c, &var, &v);
         else if (!initialized && c->code != &c->init)
@@ -2151,6 +2164,7 @@ dmod_dmvs_js_api_declaration(1.0, int, _finish, ( dmvs_js_compiler_t compiler ))
     if (c == NULL)
         return -EINVAL;
     c->code = &c->init;
+    flush_host(c);
     int ret = finish_timers(c);
     if (ret == 0 && c->init.count > 0)
     {
@@ -2227,4 +2241,63 @@ dmod_dmvs_js_api_declaration(1.0, void, _report, ( dmvs_js_compiler_t compiler, 
 {
     if (compiler != NULL && message != NULL)
         report((compiler_t*)compiler, message);
+}
+
+dmod_dmvs_js_api_declaration(1.0, uint32_t, _object_domain, ( dmvs_js_compiler_t compiler, dmvsi_var_t var, uint32_t* objects, uint32_t max ))
+{
+    compiler_t* c = (compiler_t*)compiler;
+    if (c == NULL || var == 0)
+        return 0;
+    /* The variables it is set from, and theirs: their objects */
+    dmvsi_var_t seen[64];
+    uint32_t seen_count = 0, done = 0, count = 0;
+    seen[seen_count++] = var;
+    while (done < seen_count)
+    {
+        dmvsi_var_t v = seen[done++];
+        for (const holds_t* h = c->holds; h != NULL; h = h->next)
+        {
+            if (h->var != v)
+                continue;
+            if (h->from != 0)
+            {
+                bool known = false;
+                for (uint32_t i = 0; i < seen_count && !known; i++)
+                    known = seen[i] == h->from;
+                if (!known && seen_count < sizeof(seen) / sizeof(seen[0]))
+                    seen[seen_count++] = h->from;
+                continue;
+            }
+            bool known = false;
+            for (uint32_t i = 0; i < count && i < max && !known; i++)
+                known = objects[i] == h->object;
+            if (known)
+                continue;
+            if (count < max && objects != NULL)
+                objects[count] = h->object;
+            count++;
+        }
+    }
+    return count;
+}
+
+dmod_dmvs_js_api_declaration(1.0, int, _array, ( dmvs_js_compiler_t compiler, const dmvs_js_value_t* values, uint32_t count, dmvs_js_value_t* array ))
+{
+    compiler_t* c = (compiler_t*)compiler;
+    if (c == NULL || array == NULL || (values == NULL && count > 0))
+        return -EINVAL;
+    object_t* a = new_object(c, O_ARRAY);
+    if (a == NULL)
+        return -ENOMEM;
+    a->values = arena_alloc(&c->arena, (count + 1U) * sizeof(value_t));
+    if (a->values == NULL)
+    {
+        c->failed = true;
+        return -ENOMEM;
+    }
+    if (count > 0)
+        memcpy(a->values, values, count * sizeof(value_t));
+    a->count = count;
+    *array = v_internal(a);
+    return 0;
 }
