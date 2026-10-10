@@ -199,6 +199,7 @@ struct compiler
     holds_t*        holds;
     deferred_t*     deferred;
     bool            flushing;           /* In the host's flush() */
+    uint32_t        html;               /* Compiling what is set to an innerHTML: its strings' character references decoded */
     program_t*      programs;           /* Every piece of code seen (the pre-scan looks at all) - the compiler's */
 };
 
@@ -210,6 +211,7 @@ bool            is_unknown(const value_t* v);
 value_t         v_number(double n);
 value_t         v_bool(bool b);
 value_t         v_string(compiler_t* c, const char* s, size_t n);
+value_t         html_string(compiler_t* c, const char* s, size_t n);   /* &deg; &amp; &#176; ... decoded */
 value_t         v_runtime(uint8_t type, uint8_t scale, dmvsi_var_t var);
 value_t         v_internal(const object_t* o);
 object_t*       new_object(compiler_t* c, uint8_t kind);

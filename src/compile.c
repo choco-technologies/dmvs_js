@@ -854,7 +854,8 @@ static value_t template_value(compiler_t* c, scope_t* s, const node_t* n)
     value_t parts[32];
     uint32_t count = 0;
     for (const node_t* k = n->a; k != NULL && count < 32u; k = k->next)
-        parts[count++] = (k->kind == DMVS_JS_STRING && k == n->a) ? v_string(c, k->text, k->length) : expression(c, s, k);
+        parts[count++] = (k->kind == DMVS_JS_STRING && k == n->a) ?
+                         ((c->html > 0) ? html_string(c, k->text, k->length) : v_string(c, k->text, k->length)) : expression(c, s, k);
     return concat(c, parts, count);
 }
 
@@ -1024,7 +1025,7 @@ static value_t expression(compiler_t* c, scope_t* s, const node_t* n)
             return v_number(v);
         }
         case DMVS_JS_STRING:
-            return v_string(c, n->text, n->length);
+            return (c->html > 0) ? html_string(c, n->text, n->length) : v_string(c, n->text, n->length);
         case DMVS_JS_TEMPLATE:
             return template_value(c, s, n);
         case DMVS_JS_BOOL:
@@ -1213,7 +1214,12 @@ static value_t expression(compiler_t* c, scope_t* s, const node_t* n)
         }
         case DMVS_JS_ASSIGN:
         {
+            /* el.innerHTML = '22.0&deg;': its text's character references decoded */
+            const char* target = (n->a->kind == DMVS_JS_MEMBER) ? member_name(n->a) : NULL;
+            bool html = target != NULL && strcmp(target, "innerHTML") == 0;
+            c->html += html ? 1U : 0U;
             value_t v = expression(c, s, n->b);
+            c->html -= html ? 1U : 0U;
             c->at = n;
             return assign(c, s, n->a, n->op, &v);
         }

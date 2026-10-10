@@ -160,7 +160,7 @@ static int host_set(void* ctx, dmvs_js_compiler_t c, const dmvs_js_value_t* obje
     if (object->kind == DMVS_JS_V_RUNTIME)
         return set_held(p, c, object, name, value);
     element_t* e = element(p, object->object);
-    if (e == NULL || (strcmp(name, "innerText") != 0 && strcmp(name, "textContent") != 0))
+    if (e == NULL || (strcmp(name, "innerText") != 0 && strcmp(name, "textContent") != 0 && strcmp(name, "innerHTML") != 0))
         return -ENOTSUP;
     dmvsi_action_t a;
     memset(&a, 0, sizeof(a));
@@ -576,7 +576,7 @@ DMOD_TEST_STEP(dmvs_js_reads_numbers_from_texts)
         "const t = document.getElementById('temp');\n"
         "function bump(d) {\n"
         "  const v = parseFloat(t.innerText);\n"
-        "  t.innerText = (v + d).toFixed(1) + '\xC2\xB0" "C';\n"
+        "  t.innerHTML = (v + d).toFixed(1) + '&deg;C';\n"
         "}\n"
         "document.getElementById('up').addEventListener('click', () => bump(0.5));\n"
         "document.getElementById('down').addEventListener('click', function () { bump(-0.5); });\n"));

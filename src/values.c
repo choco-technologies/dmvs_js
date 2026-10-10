@@ -68,6 +68,88 @@ value_t v_string(compiler_t* c, const char* s, size_t n)
     return v;
 }
 
+/* A character reference's text (&deg;): its code point, 0 when it is none the compiler knows */
+static uint32_t entity(const char* name, size_t n)
+{
+    static const struct { char name[8]; uint16_t cp; } names[] = {
+        { "amp", '&' }, { "lt", '<' }, { "gt", '>' }, { "quot", '"' }, { "apos", '\'' }, { "nbsp", 0xA0 },
+        { "deg", 0xB0 }, { "copy", 0xA9 }, { "reg", 0xAE }, { "middot", 0xB7 }, { "bull", 0x2022 },
+        { "hellip", 0x2026 }, { "ndash", 0x2013 }, { "mdash", 0x2014 }, { "times", 0xD7 }, { "euro", 0x20AC },
+        { "plusmn", 0xB1 }, { "micro", 0xB5 }, { "laquo", 0xAB }, { "raquo", 0xBB }, { "larr", 0x2190 },
+        { "rarr", 0x2192 }, { "uarr", 0x2191 }, { "darr", 0x2193 }, { "trade", 0x2122 },
+    };
+    if (n >= 2 && name[0] == '#')
+    {
+        uint32_t cp = 0;
+        bool hex = name[1] == 'x' || name[1] == 'X';
+        for (size_t i = hex ? 2 : 1; i < n; i++)
+        {
+            char ch = name[i];
+            uint32_t d = (ch >= '0' && ch <= '9') ? (uint32_t)(ch - '0') : (hex && ch >= 'a' && ch <= 'f') ? (uint32_t)(ch - 'a' + 10) :
+                         (hex && ch >= 'A' && ch <= 'F') ? (uint32_t)(ch - 'A' + 10) : 99u;
+            if (d >= (hex ? 16u : 10u) || cp > 0x10FFFFu)
+                return 0;
+            cp = cp * (hex ? 16u : 10u) + d;
+        }
+        return (cp <= 0x10FFFFu) ? cp : 0;
+    }
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
+    {
+        if (strlen(names[i].name) == n && memcmp(names[i].name, name, n) == 0)
+            return names[i].cp;
+    }
+    return 0;
+}
+
+value_t html_string(compiler_t* c, const char* s, size_t n)
+{
+    char* out = arena_alloc(&c->arena, n + 1U);         /* UTF-8 of a reference is shorter than it */
+    if (out == NULL)
+    {
+        c->failed = true;
+        return v_string(c, "", 0);
+    }
+    size_t k = 0;
+    for (size_t i = 0; i < n; )
+    {
+        uint32_t cp = 0;
+        size_t end = i + 1U;
+        if (s[i] == '&')
+        {
+            while (end < n && end - i < 10U && s[end] != ';' && s[end] != '&')
+                end++;
+            cp = (end < n && s[end] == ';') ? entity(s + i + 1U, end - i - 1U) : 0;
+        }
+        if (cp == 0)
+        {
+            out[k++] = s[i++];
+            continue;
+        }
+        if (cp < 0x80u)
+            out[k++] = (char)cp;
+        else if (cp < 0x800u)
+        {
+            out[k++] = (char)(0xC0u | (cp >> 6));
+            out[k++] = (char)(0x80u | (cp & 0x3Fu));
+        }
+        else if (cp < 0x10000u)
+        {
+            out[k++] = (char)(0xE0u | (cp >> 12));
+            out[k++] = (char)(0x80u | ((cp >> 6) & 0x3Fu));
+            out[k++] = (char)(0x80u | (cp & 0x3Fu));
+        }
+        else
+        {
+            out[k++] = (char)(0xF0u | (cp >> 18));
+            out[k++] = (char)(0x80u | ((cp >> 12) & 0x3Fu));
+            out[k++] = (char)(0x80u | ((cp >> 6) & 0x3Fu));
+            out[k++] = (char)(0x80u | (cp & 0x3Fu));
+        }
+        i = end + 1U;
+    }
+    return v_string(c, out, k);
+}
+
 value_t v_runtime(uint8_t type, uint8_t scale, dmvsi_var_t var)
 {
     value_t v = v_undefined();
