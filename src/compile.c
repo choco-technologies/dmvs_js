@@ -585,6 +585,12 @@ static test_t condition(compiler_t* c, scope_t* s, const node_t* n)
         t.value = truthy(&v);
         return t;
     }
+    if (v.kind == DMVS_JS_V_RUNTIME && v.type != DMVS_JS_T_TEXT)
+    {
+        t.kind = DMVSI_ACT_IF_NE;                   /* A number, a boolean, an element: not 0 */
+        t.var = v.var;
+        return t;
+    }
     value_t b = to_bool(c, &v);
     if (is_static(&b))
     {
