@@ -390,6 +390,8 @@ static uint8_t scale_of(const value_t* v)
 /* a op b, numbers: runtime when either is */
 static value_t arithmetic(compiler_t* c, uint8_t op, const value_t* a, const value_t* b)
 {
+    if (is_unknown(a) || is_unknown(b))
+        return v_unknown();
     if (is_static(a) && is_static(b))
     {
         double x = static_double(a), y = static_double(b);
@@ -414,7 +416,7 @@ static value_t arithmetic(compiler_t* c, uint8_t op, const value_t* a, const val
                 if ((double)e != y || e < 0 || e > 64)
                 {
                     report(c, "a power that is not a small whole number - not converted");
-                    return v_number(0.0);
+                    return v_unknown();
                 }
                 while (e-- > 0)
                     r *= x;
@@ -427,7 +429,7 @@ static value_t arithmetic(compiler_t* c, uint8_t op, const value_t* a, const val
     if (!(numeric(a) || is_static(a)) || !(numeric(b) || is_static(b)))
     {
         report(c, "arithmetic on what is not a number - not converted");
-        return v_number(0.0);
+        return v_unknown();
     }
     uint8_t sa = scale_of(a), sb = scale_of(b);
     dmvsi_var_t var;
@@ -470,7 +472,7 @@ static value_t arithmetic(compiler_t* c, uint8_t op, const value_t* a, const val
         }
         default:
             report(c, "an operator the view does not have for runtime numbers - not converted");
-            return v_number(0.0);
+            return v_unknown();
     }
 }
 
@@ -482,6 +484,7 @@ typedef struct
     dmvsi_var_t     operand;
     int32_t         imm;
     bool            value;
+    bool            unknown;            /* Of what is not converted: neither way is taken */
 } test_t;
 
 static uint8_t if_kind(uint8_t op, bool swapped)
@@ -502,6 +505,11 @@ static test_t compare(compiler_t* c, uint8_t op, const value_t* a, const value_t
 {
     test_t t;
     memset(&t, 0, sizeof(t));
+    if (is_unknown(a) || is_unknown(b))
+    {
+        t.unknown = true;
+        return t;
+    }
     if (is_static(a) && is_static(b))
     {
         bool eq;
@@ -559,6 +567,8 @@ static test_t compare(compiler_t* c, uint8_t op, const value_t* a, const value_t
 /* A test as a boolean value */
 static value_t test_value(compiler_t* c, const test_t* t)
 {
+    if (t->unknown)
+        return v_unknown();
     if (t->kind == 0)
         return v_bool(t->value);
     dmvsi_var_t r = temp(c, DMVS_JS_T_BOOL);
@@ -581,6 +591,11 @@ static test_t condition(compiler_t* c, scope_t* s, const node_t* n)
         return compare(c, n->op, &a, &b);
     }
     value_t v = expression(c, s, n);
+    if (is_unknown(&v))
+    {
+        t.unknown = true;
+        return t;
+    }
     if (is_static(&v))
     {
         t.value = truthy(&v);
@@ -625,7 +640,7 @@ static value_t select(compiler_t* c, const object_t* sel, const char* property)
         if (!is_static(&picks[i]) || picks[i].kind == DMVS_JS_V_OBJECT || picks[i].kind == DMVS_JS_V_INTERNAL)
         {
             report(c, "picking what is not a number or a text by a runtime index - not converted");
-            return v_undefined();
+            return v_unknown();
         }
         texts = texts || picks[i].kind == DMVS_JS_V_STRING;
         numbers = numbers || picks[i].kind != DMVS_JS_V_STRING;
@@ -635,7 +650,7 @@ static value_t select(compiler_t* c, const object_t* sel, const char* property)
     if (texts && numbers)
     {
         report(c, "picking numbers and texts by a runtime index - not converted");
-        return v_undefined();
+        return v_unknown();
     }
     value_t r = texts ? v_runtime(DMVS_JS_T_TEXT, 0, temp(c, DMVS_JS_T_TEXT))
                       : v_runtime(DMVS_JS_T_NUMBER, scale, temp(c, DMVS_JS_T_NUMBER));
@@ -661,6 +676,8 @@ static bool host_object(const value_t* v, const char* name)
 static value_t member(compiler_t* c, const value_t* object, const char* name)
 {
     value_t out = v_undefined();
+    if (is_unknown(object))
+        return v_unknown();
     if (host_object(object, name))
     {
         if (c->host.get == NULL || c->host.get(c->host.ctx, (dmvs_js_compiler_t)c, object, name, &out) != 0)
@@ -668,7 +685,7 @@ static value_t member(compiler_t* c, const value_t* object, const char* name)
             char m[96];
             Dmod_SnPrintf(m, sizeof(m), "the element's %s - not converted", name);
             report(c, m);
-            return v_undefined();
+            return v_unknown();
         }
         return out;
     }
@@ -701,6 +718,8 @@ static value_t member(compiler_t* c, const value_t* object, const char* name)
 /* object[index] */
 static value_t index_of(compiler_t* c, const value_t* object, const value_t* index)
 {
+    if (is_unknown(object) || is_unknown(index))
+        return v_unknown();
     const object_t* a = as_object(object, O_ARRAY);
     if (is_static(index))
     {
@@ -728,7 +747,7 @@ static value_t index_of(compiler_t* c, const value_t* object, const value_t* ind
         return v_internal(sel);
     }
     report(c, "an index known only when the view runs - not converted");
-    return v_undefined();
+    return v_unknown();
 }
 
 static value_t array_literal(compiler_t* c, scope_t* s, const node_t* n)
@@ -843,6 +862,8 @@ static value_t template_value(compiler_t* c, scope_t* s, const node_t* n)
 static value_t assign(compiler_t* c, scope_t* s, const node_t* target, uint8_t op, const value_t* value)
 {
     value_t v = *value;
+    if (is_unknown(&v))
+        return v;                                   /* Reported: what it sets stays as it is */
     if (target->kind == DMVS_JS_IDENT)
     {
         binding_t* b = lookup(s, target->text);
@@ -948,7 +969,7 @@ static value_t call_expression(compiler_t* c, scope_t* s, const node_t* n)
             if (method == NULL)
             {
                 report(c, "a method known only when the view runs - not converted");
-                return v_undefined();
+                return v_unknown();
             }
         }
     }
@@ -958,11 +979,18 @@ static value_t call_expression(compiler_t* c, scope_t* s, const node_t* n)
         if (a->kind == DMVS_JS_SPREAD || count >= MAX_ARGS)
         {
             report(c, "spread arguments, or too many - not converted");
-            return v_undefined();
+            return v_unknown();
         }
         args[count++] = expression(c, s, a);
     }
     c->at = n;
+    if (is_unknown(&self))
+        return v_unknown();
+    for (uint32_t i = 0; i < count; i++)
+    {
+        if (is_unknown(&args[i]) && method != NULL && host_object(&self, method))
+            return v_unknown();                     /* The host given what is not converted: neither is this */
+    }
 
     if (method != NULL && host_object(&self, method))
     {
@@ -1029,7 +1057,7 @@ static value_t expression(compiler_t* c, scope_t* s, const node_t* n)
             char m[96];
             Dmod_SnPrintf(m, sizeof(m), "the name %s - not converted", n->text);
             report(c, m);
-            return v_undefined();
+            return v_unknown();
         }
         case DMVS_JS_ARRAY:
             return array_literal(c, s, n);
@@ -1055,11 +1083,13 @@ static value_t expression(compiler_t* c, scope_t* s, const node_t* n)
             return call_expression(c, s, n);
         case DMVS_JS_NEW:
             report(c, "new - not converted");
-            return v_undefined();
+            return v_unknown();
         case DMVS_JS_UNARY:
         {
             value_t a = expression(c, s, n->a);
             c->at = n;
+            if (is_unknown(&a) && n->op != DMVS_JS_OP_TYPEOF && n->op != DMVS_JS_OP_VOID)
+                return v_unknown();
             switch (n->op)
             {
                 case DMVS_JS_OP_NOT:
@@ -1098,7 +1128,7 @@ static value_t expression(compiler_t* c, scope_t* s, const node_t* n)
                     return v_undefined();
                 default:
                     report(c, "an operator the compiler does not take - not converted");
-                    return v_undefined();
+                    return v_unknown();
             }
         }
         case DMVS_JS_UPDATE:
@@ -1124,7 +1154,7 @@ static value_t expression(compiler_t* c, scope_t* s, const node_t* n)
             if (n->op == DMVS_JS_OP_IN || n->op == DMVS_JS_OP_INSTANCEOF || n->op >= DMVS_JS_OP_SHL)
             {
                 report(c, "an operator the compiler does not take - not converted");
-                return v_undefined();
+                return v_unknown();
             }
             return arithmetic(c, n->op, &a, &b);
         }
@@ -1132,6 +1162,8 @@ static value_t expression(compiler_t* c, scope_t* s, const node_t* n)
         {
             value_t a = expression(c, s, n->a);
             c->at = n;
+            if (is_unknown(&a))
+                return v_unknown();
             if (is_static(&a))
             {
                 bool nullish = a.kind == DMVS_JS_V_NULL || a.kind == DMVS_JS_V_UNDEFINED;
@@ -1158,6 +1190,8 @@ static value_t expression(compiler_t* c, scope_t* s, const node_t* n)
         {
             test_t t = condition(c, s, n->a);
             c->at = n;
+            if (t.unknown)
+                return v_unknown();
             if (t.kind == 0)
                 return expression(c, s, t.value ? n->b : n->c);
             emit_op(c, t.kind, t.var, t.operand, t.imm, NULL);
@@ -1192,7 +1226,7 @@ static value_t expression(compiler_t* c, scope_t* s, const node_t* n)
         }
         default:
             report(c, "an expression the compiler does not take - not converted");
-            return v_undefined();
+            return v_unknown();
     }
 }
 
@@ -1447,6 +1481,8 @@ static void call_or_inline(compiler_t* c, dmvsi_handler_t h)
 
 value_t call_value(compiler_t* c, const value_t* callee, const value_t* self, const value_t* args, uint32_t count)
 {
+    if (is_unknown(callee))
+        return v_unknown();
     const object_t* f = as_object(callee, O_FUNCTION);
     if (f == NULL)
     {
@@ -1454,7 +1490,7 @@ value_t call_value(compiler_t* c, const value_t* callee, const value_t* self, co
         if (b != NULL)
             return builtin_call(c, b, args, count);
         report(c, "a call of what is not a function - not converted");
-        return v_undefined();
+        return v_unknown();
     }
     value_t me = ((f->node->flags & DMVS_JS_F_ARROW) != 0) ? f->self : *self;
     /*
@@ -1471,7 +1507,7 @@ value_t call_value(compiler_t* c, const value_t* callee, const value_t* self, co
     if (depth > MAX_RECURSION)
     {
         report(c, "a recursive call deeper than the compiler follows - not converted");
-        return v_undefined();
+        return v_unknown();
     }
     const node_t* at = c->at;
     spec_t* sp = specialize(c, f, &me, args, count, depth > 0, 0);
@@ -1757,6 +1793,11 @@ static int if_statement(compiler_t* c, scope_t* s, const node_t* n)
 {
     test_t t = condition(c, s, n->a);
     c->at = n;
+    if (t.unknown)
+    {
+        release_temps(c);
+        return 0;                                   /* On what is not converted: neither branch */
+    }
     if (t.kind == 0)
     {
         release_temps(c);
@@ -1917,7 +1958,7 @@ static int for_statement(compiler_t* c, scope_t* s, const node_t* n)
     {
         test_t t = condition(c, inner, n->b);
         c->at = n;
-        if (t.kind == 0 && !t.value)
+        if (t.kind == 0 && (!t.value || t.unknown))
             emit_op(c, DMVSI_ACT_BREAK, 0, 0, 0, NULL);
         else if (t.kind != 0)
         {
@@ -1953,7 +1994,7 @@ static int while_statement(compiler_t* c, scope_t* s, const node_t* n, bool test
         loop_body(c, s, body, &l);
     test_t t = condition(c, s, test);
     c->at = n;
-    if (t.kind == 0 && !t.value)
+    if (t.kind == 0 && (!t.value || t.unknown))
         emit_op(c, DMVSI_ACT_BREAK, 0, 0, 0, NULL);
     else if (t.kind != 0)
     {
@@ -2010,6 +2051,8 @@ static int switch_statement(compiler_t* c, scope_t* s, const node_t* n)
 {
     value_t d = expression(c, s, n->a);
     c->at = n;
+    if (is_unknown(&d))
+        return 0;
     scope_t* inner = new_scope(c, s, s->spec);
     if (is_static(&d))
     {

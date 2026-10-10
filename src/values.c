@@ -25,6 +25,18 @@ value_t v_undefined(void)
     return v;
 }
 
+value_t v_unknown(void)
+{
+    value_t v = v_undefined();
+    v.kind = DMVS_JS_V_UNKNOWN;
+    return v;
+}
+
+bool is_unknown(const value_t* v)
+{
+    return v->kind == DMVS_JS_V_UNKNOWN;
+}
+
 value_t v_number(double n)
 {
     value_t v = v_undefined();
@@ -554,6 +566,8 @@ bool text_operand(compiler_t* c, const value_t* v, dmvsi_var_t* var, const char*
 {
     *var = 0;
     *text = NULL;
+    if (is_unknown(v))
+        return false;
     if (is_static(v))
     {
         bool ok = true;
@@ -720,6 +734,11 @@ value_t to_text(compiler_t* c, const value_t* v)
 
 value_t concat(compiler_t* c, const value_t* parts, uint32_t count)
 {
+    for (uint32_t i = 0; i < count; i++)
+    {
+        if (is_unknown(&parts[i]))
+            return v_unknown();
+    }
     bool all_static = true;
     for (uint32_t i = 0; i < count; i++)
         all_static = all_static && is_static(&parts[i]);
@@ -802,6 +821,8 @@ value_t concat(compiler_t* c, const value_t* parts, uint32_t count)
 
 int assign_to(compiler_t* c, const value_t* target, const value_t* v)
 {
+    if (is_unknown(v))
+        return 0;                                   /* Reported: the variable stays as it is */
     if (target->type == DMVS_JS_T_TEXT)
     {
         dmvsi_var_t var;

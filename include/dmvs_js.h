@@ -254,6 +254,7 @@ typedef struct dmvs_js_compiler* dmvs_js_compiler_t;
 #define DMVS_JS_V_OBJECT    5u          /**< The host's: `object` */
 #define DMVS_JS_V_RUNTIME   6u          /**< Known when the view runs: the variable `var` of `type` */
 #define DMVS_JS_V_INTERNAL  7u          /**< The compiler's own (a function, an array, ...): `internal` */
+#define DMVS_JS_V_UNKNOWN   8u          /**< What is not converted (reported): what is made of it is not either - a host leaves it out */
 
 /* What a runtime value is */
 #define DMVS_JS_T_NUMBER    0u          /**< `var` holds the number * 10^scale */

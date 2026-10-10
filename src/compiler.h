@@ -205,6 +205,8 @@ struct compiler
 /* values.c */
 void            report(compiler_t* c, const char* message);
 value_t         v_undefined(void);
+value_t         v_unknown(void);                                /* Not converted (reported): nor what is made of it */
+bool            is_unknown(const value_t* v);
 value_t         v_number(double n);
 value_t         v_bool(bool b);
 value_t         v_string(compiler_t* c, const char* s, size_t n);

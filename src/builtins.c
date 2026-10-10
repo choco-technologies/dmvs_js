@@ -58,6 +58,11 @@ static bool is_text_value(const value_t* v)
 
 bool builtin_member(compiler_t* c, const value_t* object, const char* name, value_t* out)
 {
+    if (is_unknown(object))
+    {
+        *out = v_unknown();
+        return true;
+    }
     const object_t* b = as_object(object, O_BUILTIN);
     if (b != NULL && b->builtin == B_MATH)
     {
@@ -156,7 +161,7 @@ static value_t rounding(compiler_t* c, uint32_t id, const value_t* v)
     if (v->kind != DMVS_JS_V_RUNTIME || v->type == DMVS_JS_T_TEXT)
     {
         report(c, "rounding what is not a number - not converted");
-        return v_number(0.0);
+        return v_unknown();
     }
     if (number_scale(v) == 0)
         return *v;
@@ -240,7 +245,7 @@ static value_t to_number(compiler_t* c, const value_t* v, bool integer)
         return integer ? rounding(c, B_MATH_TRUNC, &f) : f;
     }
     report(c, "a number read from a text known only when the view runs - not converted");
-    return v_number(0.0);
+    return v_unknown();
 }
 
 /* n.toFixed(d) of a static n */
@@ -384,7 +389,7 @@ static value_t string_method(compiler_t* c, const value_t* self, const char* m, 
         if (!is_static(&args[i]))
         {
             report(c, "a method of a text with arguments known only when the view runs - not converted");
-            return v_undefined();
+            return v_unknown();
         }
     }
     if (name_is(m, "toUpperCase") || name_is(m, "toLowerCase"))
@@ -603,7 +608,7 @@ static value_t array_method(compiler_t* c, const object_t* a, const char* m, con
         if (!is_static(&r))
         {
             report(c, "filter / find / some / every with a test known only when the view runs - not converted");
-            return v_undefined();
+            return v_unknown();
         }
         bool yes = truthy(&r);
         if (name_is(m, "filter") && yes)
@@ -630,7 +635,7 @@ static value_t start_timer(compiler_t* c, bool repeat, const value_t* args, uint
     if (count == 0 || (count > 1 && !is_static(&args[1])))
     {
         report(c, "a timer of a time known only when the view runs - not converted");
-        return v_number(0.0);
+        return v_unknown();
     }
     if (count > 2)
         report(c, "arguments of a timer's function - not given to it");
@@ -642,7 +647,7 @@ static value_t start_timer(compiler_t* c, bool repeat, const value_t* args, uint
     if (c->site_count >= MAX_SITES)
     {
         report(c, "too many timers - not converted");
-        return v_number(0.0);
+        return v_unknown();
     }
     uint32_t k = c->site_count++;
     site_t* site = &c->sites[k];
@@ -692,7 +697,7 @@ static value_t clear_timer(compiler_t* c, const value_t* args, uint32_t count)
     if (args[0].kind != DMVS_JS_V_RUNTIME || args[0].type != DMVS_JS_T_NUMBER)
     {
         report(c, "clearing what is not a timer - not converted");
-        return v_undefined();
+        return v_unknown();
     }
     /* Any timer it may be - also the ones compiled after it: a handler made at the end */
     dmvsi_var_t var;
@@ -794,6 +799,13 @@ int finish_timers(compiler_t* c)
 value_t builtin_call(compiler_t* c, const object_t* fn, const value_t* args, uint32_t count)
 {
     value_t none = v_undefined();
+    for (uint32_t i = 0; i < count; i++)
+    {
+        if (is_unknown(&args[i]) && fn->builtin != B_NOOP)
+            return v_unknown();
+    }
+    if (is_unknown(&fn->self))
+        return v_unknown();
     const value_t* a0 = (count > 0) ? &args[0] : &none;
     switch (fn->builtin)
     {
@@ -871,6 +883,6 @@ value_t builtin_call(compiler_t* c, const object_t* fn, const value_t* args, uin
             return v_undefined();
         default:
             report(c, "a call of what is not a function - not converted");
-            return v_undefined();
+            return v_unknown();
     }
 }

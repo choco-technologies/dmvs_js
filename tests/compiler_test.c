@@ -678,15 +678,20 @@ DMOD_TEST_STEP(dmvs_js_compiles_onclick_code)
 
 DMOD_TEST_STEP(dmvs_js_reports_what_it_does_not_compile)
 {
-    const char* ids = "x=";
+    const char* ids = "x=|clock=14:32";
     page_t* p = page();
     dmvs_js_compiler_t c = compiler_of(p, ids);
     Dmod_Printf("    (reports expected:)\n");
     DMOD_TEST_EXPECT_TRUE(load(p, c,
         "class A {}\n"
         "const d = new Date();\n"
-        "document.getElementById('x').innerText = 'still';\n"));
-    DMOD_TEST_EXPECT_TRUE(p->reports >= 2u);
+        "document.getElementById('x').innerText = 'still';\n"
+        "const t = `${String(d.getHours()).padStart(2, '0')}:${d.getMinutes()}`;\n"
+        "document.getElementById('clock').innerText = t;\n"
+        "if (d.getHours() > 12) document.getElementById('x').innerText = 'pm';\n"));
+    /* What is made of what is not converted is not either - not reported again, the page as it is */
+    DMOD_TEST_EXPECT_EQ(p->reports, 2u);
+    DMOD_TEST_EXPECT_TRUE(shows_is(p, "clock", "14:32"));
     DMOD_TEST_EXPECT_EQ(dmvs_js_reports(c), p->reports);
     DMOD_TEST_EXPECT_TRUE(shows_is(p, "x", "still"));                /* The rest is compiled */
     unload(p, c);

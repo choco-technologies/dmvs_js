@@ -70,7 +70,10 @@ variables of the document.
   keeps a shadow of the element's number.
 
 What isn't compiled is reported through the host's `report()` with its
-line and column, and the rest is compiled. Examples are classes, `new`,
+line and column, and the rest is compiled. Values made from it (a text
+of `new Date()`'s parts, an `if` on one) are `DMVS_JS_V_UNKNOWN`. They
+aren't reported again, they aren't set (the element keeps its text),
+and an `if` on one takes neither branch. Examples are classes, `new`,
 `try`, labels, spreads, and comparisons of runtime texts.
 
 ## The language
