@@ -25,6 +25,38 @@ value_t v_undefined(void)
     return v;
 }
 
+value_t v_unknown(void)
+{
+    value_t v = v_undefined();
+    v.kind = DMVS_JS_V_UNKNOWN;
+    return v;
+}
+
+bool is_unknown(const value_t* v)
+{
+    return v->kind == DMVS_JS_V_UNKNOWN;
+}
+
+const object_t* choice_of(const value_t* v)
+{
+    const object_t* o = (v->kind == DMVS_JS_V_RUNTIME) ? v->internal : NULL;
+    return (o != NULL && o->kind == O_CHOICE) ? o : NULL;
+}
+
+/* What a runtime value is one of: picks[index] (index a variable of 0 ...) */
+void set_choice(compiler_t* c, value_t* v, const value_t* picks, uint32_t count, dmvsi_var_t index)
+{
+    object_t* o = new_object(c, O_CHOICE);
+    value_t* values = arena_alloc(&c->arena, (count + 1U) * sizeof(value_t));
+    if (o == NULL || values == NULL || index == 0)
+        return;
+    memcpy(values, picks, count * sizeof(value_t));
+    o->values = values;
+    o->count = count;
+    o->index = index;
+    v->internal = o;
+}
+
 value_t v_number(double n)
 {
     value_t v = v_undefined();
@@ -54,6 +86,88 @@ value_t v_string(compiler_t* c, const char* s, size_t n)
         v.length = 0;
     }
     return v;
+}
+
+/* A character reference's text (&deg;): its code point, 0 when it is none the compiler knows */
+static uint32_t entity(const char* name, size_t n)
+{
+    static const struct { char name[8]; uint16_t cp; } names[] = {
+        { "amp", '&' }, { "lt", '<' }, { "gt", '>' }, { "quot", '"' }, { "apos", '\'' }, { "nbsp", 0xA0 },
+        { "deg", 0xB0 }, { "copy", 0xA9 }, { "reg", 0xAE }, { "middot", 0xB7 }, { "bull", 0x2022 },
+        { "hellip", 0x2026 }, { "ndash", 0x2013 }, { "mdash", 0x2014 }, { "times", 0xD7 }, { "euro", 0x20AC },
+        { "plusmn", 0xB1 }, { "micro", 0xB5 }, { "laquo", 0xAB }, { "raquo", 0xBB }, { "larr", 0x2190 },
+        { "rarr", 0x2192 }, { "uarr", 0x2191 }, { "darr", 0x2193 }, { "trade", 0x2122 },
+    };
+    if (n >= 2 && name[0] == '#')
+    {
+        uint32_t cp = 0;
+        bool hex = name[1] == 'x' || name[1] == 'X';
+        for (size_t i = hex ? 2 : 1; i < n; i++)
+        {
+            char ch = name[i];
+            uint32_t d = (ch >= '0' && ch <= '9') ? (uint32_t)(ch - '0') : (hex && ch >= 'a' && ch <= 'f') ? (uint32_t)(ch - 'a' + 10) :
+                         (hex && ch >= 'A' && ch <= 'F') ? (uint32_t)(ch - 'A' + 10) : 99u;
+            if (d >= (hex ? 16u : 10u) || cp > 0x10FFFFu)
+                return 0;
+            cp = cp * (hex ? 16u : 10u) + d;
+        }
+        return (cp <= 0x10FFFFu) ? cp : 0;
+    }
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
+    {
+        if (strlen(names[i].name) == n && memcmp(names[i].name, name, n) == 0)
+            return names[i].cp;
+    }
+    return 0;
+}
+
+value_t html_string(compiler_t* c, const char* s, size_t n)
+{
+    char* out = arena_alloc(&c->arena, n + 1U);         /* UTF-8 of a reference is shorter than it */
+    if (out == NULL)
+    {
+        c->failed = true;
+        return v_string(c, "", 0);
+    }
+    size_t k = 0;
+    for (size_t i = 0; i < n; )
+    {
+        uint32_t cp = 0;
+        size_t end = i + 1U;
+        if (s[i] == '&')
+        {
+            while (end < n && end - i < 10U && s[end] != ';' && s[end] != '&')
+                end++;
+            cp = (end < n && s[end] == ';') ? entity(s + i + 1U, end - i - 1U) : 0;
+        }
+        if (cp == 0)
+        {
+            out[k++] = s[i++];
+            continue;
+        }
+        if (cp < 0x80u)
+            out[k++] = (char)cp;
+        else if (cp < 0x800u)
+        {
+            out[k++] = (char)(0xC0u | (cp >> 6));
+            out[k++] = (char)(0x80u | (cp & 0x3Fu));
+        }
+        else if (cp < 0x10000u)
+        {
+            out[k++] = (char)(0xE0u | (cp >> 12));
+            out[k++] = (char)(0x80u | ((cp >> 6) & 0x3Fu));
+            out[k++] = (char)(0x80u | (cp & 0x3Fu));
+        }
+        else
+        {
+            out[k++] = (char)(0xF0u | (cp >> 18));
+            out[k++] = (char)(0x80u | ((cp >> 12) & 0x3Fu));
+            out[k++] = (char)(0x80u | ((cp >> 6) & 0x3Fu));
+            out[k++] = (char)(0x80u | (cp & 0x3Fu));
+        }
+        i = end + 1U;
+    }
+    return v_string(c, out, k);
 }
 
 value_t v_runtime(uint8_t type, uint8_t scale, dmvsi_var_t var)
@@ -329,8 +443,58 @@ bool parse_number(const char* s, size_t n, double* out)
 
 /* ---- Code ---- */
 
+void flush_host(compiler_t* c)
+{
+    if (c->host.flush == NULL || c->flushing || c->code == NULL)
+        return;
+    c->flushing = true;
+    c->host.flush(c->host.ctx, (dmvs_js_compiler_t)c);
+    c->flushing = false;
+}
+
+/* What makes the code go another way: the host's changes kept back are emitted before it */
+static bool flow_kind(uint8_t kind)
+{
+    switch (kind)
+    {
+        case DMVSI_ACT_IF_EQ: case DMVSI_ACT_IF_NE: case DMVSI_ACT_IF_LT: case DMVSI_ACT_IF_LE:
+        case DMVSI_ACT_IF_GT: case DMVSI_ACT_IF_GE: case DMVSI_ACT_ELSE: case DMVSI_ACT_END:
+        case DMVSI_ACT_LOOP: case DMVSI_ACT_BREAK: case DMVSI_ACT_CONTINUE: case DMVSI_ACT_CALL:
+        case DMVSI_ACT_RETURN:
+            return true;
+        default:
+            return false;
+    }
+}
+
+void track(compiler_t* c, dmvsi_var_t var, const value_t* v)
+{
+    bool object = v->kind == DMVS_JS_V_OBJECT;
+    bool from = v->kind == DMVS_JS_V_RUNTIME && v->type == DMVS_JS_T_NUMBER && v->var != var;
+    if (var == 0 || !(object || from))
+        return;
+    for (const holds_t* h = c->holds; h != NULL; h = h->next)
+    {
+        if (h->var == var && (object ? (h->from == 0 && h->object == v->object) : h->from == v->var))
+            return;
+    }
+    holds_t* h = arena_alloc(&c->arena, sizeof(holds_t));
+    if (h == NULL)
+    {
+        c->failed = true;
+        return;
+    }
+    h->var = var;
+    h->from = object ? 0 : v->var;
+    h->object = object ? v->object : 0;
+    h->next = c->holds;
+    c->holds = h;
+}
+
 int emit(compiler_t* c, const dmvsi_action_t* a)
 {
+    if (flow_kind(a->kind))
+        flush_host(c);
     code_t* k = c->code;
     if (k->count == k->capacity)
     {
@@ -436,6 +600,11 @@ bool number_operand(compiler_t* c, const value_t* v, uint8_t scale, dmvsi_var_t*
     double n;
     *var = 0;
     *imm = 0;
+    if (v->kind == DMVS_JS_V_OBJECT)
+    {
+        *imm = (int32_t)v->object;                  /* The host's object: its handle */
+        return true;
+    }
     if (static_number(v, &n))
     {
         double scaled = n * pow10i(scale);
@@ -499,6 +668,8 @@ bool text_operand(compiler_t* c, const value_t* v, dmvsi_var_t* var, const char*
 {
     *var = 0;
     *text = NULL;
+    if (is_unknown(v))
+        return false;
     if (is_static(v))
     {
         bool ok = true;
@@ -665,6 +836,11 @@ value_t to_text(compiler_t* c, const value_t* v)
 
 value_t concat(compiler_t* c, const value_t* parts, uint32_t count)
 {
+    for (uint32_t i = 0; i < count; i++)
+    {
+        if (is_unknown(&parts[i]))
+            return v_unknown();
+    }
     bool all_static = true;
     for (uint32_t i = 0; i < count; i++)
         all_static = all_static && is_static(&parts[i]);
@@ -702,8 +878,35 @@ value_t concat(compiler_t* c, const value_t* parts, uint32_t count)
         return v;
     }
 
+    /* One part a choice, the others static: a choice of the texts it makes */
+    const object_t* choice = NULL;
+    uint32_t choices = 0;
+    for (uint32_t i = 0; i < count; i++)
+    {
+        if (!is_static(&parts[i]))
+        {
+            choices++;
+            choice = choice_of(&parts[i]);
+        }
+    }
+    value_t* made = NULL;
+    if (choices == 1 && choice != NULL && (made = arena_alloc(&c->arena, (choice->count + 1U) * sizeof(value_t))) != NULL)
+    {
+        value_t* each = arena_alloc(&c->arena, (count + 1U) * sizeof(value_t));
+        for (uint32_t k = 0; k < choice->count && each != NULL; k++)
+        {
+            for (uint32_t i = 0; i < count; i++)
+                each[i] = is_static(&parts[i]) ? parts[i] : choice->values[k];
+            made[k] = concat(c, each, count);
+        }
+        if (each == NULL)
+            made = NULL;
+    }
+
     dmvsi_var_t t = temp(c, DMVS_JS_T_TEXT);
     value_t out = v_runtime(DMVS_JS_T_TEXT, 0, t);
+    if (made != NULL)
+        set_choice(c, &out, made, choice->count, choice->index);
     bool first = true;
     for (uint32_t i = 0; i < count; i++)
     {
@@ -747,6 +950,8 @@ value_t concat(compiler_t* c, const value_t* parts, uint32_t count)
 
 int assign_to(compiler_t* c, const value_t* target, const value_t* v)
 {
+    if (is_unknown(v))
+        return 0;                                   /* Reported: the variable stays as it is */
     if (target->type == DMVS_JS_T_TEXT)
     {
         dmvsi_var_t var;
@@ -760,6 +965,8 @@ int assign_to(compiler_t* c, const value_t* target, const value_t* v)
     value_t b = (target->type == DMVS_JS_T_BOOL) ? to_bool(c, v) : *v;
     dmvsi_var_t var;
     int32_t imm;
+    if (target->type == DMVS_JS_T_NUMBER && target->scale == 0)
+        track(c, target->var, v);
     if (!number_operand(c, &b, target->scale, &var, &imm))
     {
         report(c, "a value of another type than the variable's - not converted");

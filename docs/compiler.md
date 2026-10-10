@@ -49,7 +49,15 @@ variables of the document.
     call is that value.
   - A recursive call (`a → b → a`) compiles another copy of the function,
     up to two levels deep. Deeper calls are reported.
-  - `setTimeout(tick, 100)` inside `tick` uses the handler being compiled.
+  - A small function (up to 64 actions) is copied in place of its
+    `CALL`, because dmview's calls only nest 8 deep. An early `return`
+    in it becomes a `BREAK` out of a one-pass `LOOP`.
+- **Listeners and timers**: a function given to `addEventListener`,
+  `setTimeout` or `setInterval`, and `onclick` code, gets its handler
+  right away but is compiled at `dmvs_js_finish()`. It runs after the
+  scripts have loaded, so it sees what they made after it was registered
+  (`const x = …` further down). `setTimeout(tick, 100)` inside `tick`
+  gets the same handler.
 - **Timers**: every `setTimeout` / `setInterval` call site has variables
   for whether it is started and when it is due, plus a view timer that
   polls it. The timer runs every 10–50 ms, depending on the call's delay.
@@ -62,8 +70,26 @@ variables of the document.
   keeps a shadow of the element's number.
 
 What isn't compiled is reported through the host's `report()` with its
-line and column, and the rest is compiled. Examples are classes, `new`,
+line and column, and the rest is compiled. Values made from it (a text
+of `new Date()`'s parts, an `if` on one) are `DMVS_JS_V_UNKNOWN`. They
+aren't reported again, they aren't set (the element keeps its text),
+and an `if` on one takes neither branch. Examples are classes, `new`,
 `try`, labels, spreads, and comparisons of runtime texts.
+
+## An evaluator
+
+`dmvs_js_evaluator_new(&host)` runs the scripts' loading the way a
+browser runs it, at conversion:
+- every variable is known and assignments are followed;
+- functions run on every call, and `return` ends them;
+- loops really iterate;
+- listeners and timers don't run;
+- nothing is emitted.
+
+The host learns what the page is once its scripts have loaded. For
+example, dmvs_html records the elements the scripts create
+(`createElement`, `innerHTML`, `appendChild`) and lays the page out with
+them.
 
 ## The language
 
@@ -91,16 +117,33 @@ typedef struct
 {
     void*   ctx;
     bool    (*global)(void* ctx, dmvs_js_compiler_t c, const char* name, dmvs_js_value_t* value);
-    int     (*get)(void* ctx, dmvs_js_compiler_t c, uint32_t object, const char* name, dmvs_js_value_t* value);
-    int     (*set)(void* ctx, dmvs_js_compiler_t c, uint32_t object, const char* name, const dmvs_js_value_t* value);
-    int     (*call)(void* ctx, dmvs_js_compiler_t c, uint32_t object, const char* method,
+    int     (*get)(void* ctx, dmvs_js_compiler_t c, const dmvs_js_value_t* object, const char* name, dmvs_js_value_t* value);
+    int     (*set)(void* ctx, dmvs_js_compiler_t c, const dmvs_js_value_t* object, const char* name,
+                   const dmvs_js_value_t* value);
+    int     (*call)(void* ctx, dmvs_js_compiler_t c, const dmvs_js_value_t* object, const char* method,
                     const dmvs_js_value_t* args, uint32_t count, dmvs_js_value_t* result);
     void    (*report)(void* ctx, uint32_t line, uint32_t column, const char* message);
+    void    (*flush)(void* ctx, dmvs_js_compiler_t c);          /* optional */
 } dmvs_js_host_t;
 ```
 
 - An object is a `DMVS_JS_V_OBJECT` value with the host's handle, for
   example an element returned by `getElementById()`.
+- A variable can hold elements: `let current = null; … current = el`.
+  It is an integer variable set to the handles (0 for null), and
+  `get` / `set` / `call` receive it as a `DMVS_JS_V_RUNTIME` value.
+  `dmvs_js_object_domain(c, var, …)` lists every object it may hold:
+  those assigned to it and to the variables assigned to it. The list is
+  complete after `dmvs_js_finish()`, so the host emits a `CALL` of a
+  handler it reserves (`dmvsi_new_handler()`) and fills that handler at
+  the end with an `IF` for each object.
+- `flush`, if set, is called before the code changes direction (`IF`,
+  `ELSE`, `END`, `LOOP`, `BREAK`, `CONTINUE`, `CALL`, `RETURN`), before
+  another function's code is made, and at the end of a function's code.
+  A host can keep changes back until then, for example classes changed
+  together, which make one look.
+- `dmvs_js_array()` makes an array of values, such as the elements of a
+  `querySelectorAll()`.
 - `get`, `set` and `call` return 0, or `-ENOTSUP` for something the host
   doesn't do (the compiler reports it).
 - While handling one of them, the host may emit actions with

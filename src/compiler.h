@@ -35,6 +35,7 @@ typedef struct spec spec_t;
 #define O_FUNCTION      3u
 #define O_BUILTIN       4u              /* A function or object of the language (Math.floor, setTimeout, ...) */
 #define O_SELECT        5u              /* An element of a static array picked by a runtime index */
+#define O_CHOICE        6u              /* A runtime value that is one of static ones (values[index]): its `internal` */
 
 typedef struct object object_t;
 struct object
@@ -137,6 +138,32 @@ typedef struct
     dmvsi_handler_t handler;            /* The callback */
 } site_t;
 
+/* What a variable is set to (its domain: the host's objects it may hold) - an object, or another variable */
+typedef struct holds holds_t;
+struct holds
+{
+    holds_t*        next;
+    dmvsi_var_t     var;
+    dmvsi_var_t     from;               /* 0: `object` */
+    uint32_t        object;
+};
+
+/*
+ * A function given as a listener or a timer's: compiled when the scripts
+ * have loaded (dmvs_js_finish()) - it runs after they have, and sees what
+ * they made (const x = ... after addEventListener(...)) - into the handler
+ * given out for it now
+ */
+typedef struct deferred deferred_t;
+struct deferred
+{
+    deferred_t*     next;
+    const object_t* fn;
+    value_t         self;
+    dmvsi_handler_t handler;
+    bool            done;
+};
+
 /* A tree the compiler was given: it keeps it (its names, its functions) until it is freed */
 typedef struct program program_t;
 struct program
@@ -170,15 +197,28 @@ struct compiler
     uint32_t        assigned_count;
     const char*     fractional[MAX_NAMES];
     uint32_t        fractional_count;
+    holds_t*        holds;
+    deferred_t*     deferred;
+    bool            flushing;           /* In the host's flush() */
+    uint32_t        html;               /* Compiling what is set to an innerHTML: its strings' character references decoded */
+    bool            evaluate;           /* An evaluator (dmvs_js_evaluator_new()): run as JavaScript runs, nothing emitted */
+    bool            returning;          /* Evaluating: a return reached - the rest of the function is not run */
+    bool            own_doc;            /* The document is the compiler's (an evaluator's scratch) */
+    uint32_t        timers;             /* Evaluating: setTimeout / setInterval given out */
     program_t*      programs;           /* Every piece of code seen (the pre-scan looks at all) - the compiler's */
 };
 
 /* values.c */
 void            report(compiler_t* c, const char* message);
 value_t         v_undefined(void);
+value_t         v_unknown(void);                                /* Not converted (reported): nor what is made of it */
+const object_t* choice_of(const value_t* v);                    /* A runtime value's static choices, NULL: none */
+void            set_choice(compiler_t* c, value_t* v, const value_t* picks, uint32_t count, dmvsi_var_t index);
+bool            is_unknown(const value_t* v);
 value_t         v_number(double n);
 value_t         v_bool(bool b);
 value_t         v_string(compiler_t* c, const char* s, size_t n);
+value_t         html_string(compiler_t* c, const char* s, size_t n);   /* &deg; &amp; &#176; ... decoded */
 value_t         v_runtime(uint8_t type, uint8_t scale, dmvsi_var_t var);
 value_t         v_internal(const object_t* o);
 object_t*       new_object(compiler_t* c, uint8_t kind);
@@ -206,6 +246,8 @@ value_t         concat(compiler_t* c, const value_t* parts, uint32_t count);
 int             assign_to(compiler_t* c, const value_t* target, const value_t* v);     /* target: RUNTIME */
 uint8_t         number_scale(const value_t* v);
 bool            parse_number(const char* s, size_t n, double* out);
+void            flush_host(compiler_t* c);
+void            track(compiler_t* c, dmvsi_var_t var, const value_t* v);  /* What var is set to: its domain */
 
 /* compile.c */
 value_t         call_value(compiler_t* c, const value_t* callee, const value_t* self, const value_t* args, uint32_t count);

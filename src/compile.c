@@ -20,10 +20,12 @@
 #define MAX_UNROLL      256u            /* Iterations of a loop unrolled at most */
 #define MAX_FUNCTIONS   128u
 #define MAX_RECURSION   2u              /* Copies of a function a recursive call makes */
+#define MAX_INLINE      64u             /* Actions of a function called in its place, not by a CALL */
 
 static value_t expression(compiler_t* c, scope_t* s, const node_t* n);
 static int statement(compiler_t* c, scope_t* s, const node_t* n);
 static int statements(compiler_t* c, scope_t* s, const node_t* first);
+static int declarations(compiler_t* c, scope_t* s, const node_t* n);
 
 /* What a loop being compiled is: a runtime LOOP, or unrolled (break / continue are flags) */
 
@@ -344,6 +346,8 @@ static void pop_loop(compiler_t* c)
 /* Whether the code ahead is skipped: an unrolled loop's break / continue reached */
 static bool skipping(compiler_t* c)
 {
+    if (c->returning)
+        return true;
     loop_t* l = current_loop(c);
     return l != NULL && !l->runtime && (l->broken || l->continued);
 }
@@ -389,6 +393,8 @@ static uint8_t scale_of(const value_t* v)
 /* a op b, numbers: runtime when either is */
 static value_t arithmetic(compiler_t* c, uint8_t op, const value_t* a, const value_t* b)
 {
+    if (is_unknown(a) || is_unknown(b))
+        return v_unknown();
     if (is_static(a) && is_static(b))
     {
         double x = static_double(a), y = static_double(b);
@@ -413,7 +419,7 @@ static value_t arithmetic(compiler_t* c, uint8_t op, const value_t* a, const val
                 if ((double)e != y || e < 0 || e > 64)
                 {
                     report(c, "a power that is not a small whole number - not converted");
-                    return v_number(0.0);
+                    return v_unknown();
                 }
                 while (e-- > 0)
                     r *= x;
@@ -426,7 +432,7 @@ static value_t arithmetic(compiler_t* c, uint8_t op, const value_t* a, const val
     if (!(numeric(a) || is_static(a)) || !(numeric(b) || is_static(b)))
     {
         report(c, "arithmetic on what is not a number - not converted");
-        return v_number(0.0);
+        return v_unknown();
     }
     uint8_t sa = scale_of(a), sb = scale_of(b);
     dmvsi_var_t var;
@@ -469,7 +475,7 @@ static value_t arithmetic(compiler_t* c, uint8_t op, const value_t* a, const val
         }
         default:
             report(c, "an operator the view does not have for runtime numbers - not converted");
-            return v_number(0.0);
+            return v_unknown();
     }
 }
 
@@ -481,6 +487,7 @@ typedef struct
     dmvsi_var_t     operand;
     int32_t         imm;
     bool            value;
+    bool            unknown;            /* Of what is not converted: neither way is taken */
 } test_t;
 
 static uint8_t if_kind(uint8_t op, bool swapped)
@@ -501,6 +508,11 @@ static test_t compare(compiler_t* c, uint8_t op, const value_t* a, const value_t
 {
     test_t t;
     memset(&t, 0, sizeof(t));
+    if (is_unknown(a) || is_unknown(b))
+    {
+        t.unknown = true;
+        return t;
+    }
     if (is_static(a) && is_static(b))
     {
         bool eq;
@@ -558,6 +570,8 @@ static test_t compare(compiler_t* c, uint8_t op, const value_t* a, const value_t
 /* A test as a boolean value */
 static value_t test_value(compiler_t* c, const test_t* t)
 {
+    if (t->unknown)
+        return v_unknown();
     if (t->kind == 0)
         return v_bool(t->value);
     dmvsi_var_t r = temp(c, DMVS_JS_T_BOOL);
@@ -580,9 +594,20 @@ static test_t condition(compiler_t* c, scope_t* s, const node_t* n)
         return compare(c, n->op, &a, &b);
     }
     value_t v = expression(c, s, n);
+    if (is_unknown(&v))
+    {
+        t.unknown = true;
+        return t;
+    }
     if (is_static(&v))
     {
         t.value = truthy(&v);
+        return t;
+    }
+    if (v.kind == DMVS_JS_V_RUNTIME && v.type != DMVS_JS_T_TEXT)
+    {
+        t.kind = DMVSI_ACT_IF_NE;                   /* A number, a boolean, an element: not 0 */
+        t.var = v.var;
         return t;
     }
     value_t b = to_bool(c, &v);
@@ -618,7 +643,7 @@ static value_t select(compiler_t* c, const object_t* sel, const char* property)
         if (!is_static(&picks[i]) || picks[i].kind == DMVS_JS_V_OBJECT || picks[i].kind == DMVS_JS_V_INTERNAL)
         {
             report(c, "picking what is not a number or a text by a runtime index - not converted");
-            return v_undefined();
+            return v_unknown();
         }
         texts = texts || picks[i].kind == DMVS_JS_V_STRING;
         numbers = numbers || picks[i].kind != DMVS_JS_V_STRING;
@@ -628,7 +653,7 @@ static value_t select(compiler_t* c, const object_t* sel, const char* property)
     if (texts && numbers)
     {
         report(c, "picking numbers and texts by a runtime index - not converted");
-        return v_undefined();
+        return v_unknown();
     }
     value_t r = texts ? v_runtime(DMVS_JS_T_TEXT, 0, temp(c, DMVS_JS_T_TEXT))
                       : v_runtime(DMVS_JS_T_NUMBER, scale, temp(c, DMVS_JS_T_NUMBER));
@@ -638,21 +663,33 @@ static value_t select(compiler_t* c, const object_t* sel, const char* property)
         assign_to(c, &r, &picks[i]);
         emit_end(c);
     }
+    set_choice(c, &r, picks, n, sel->index);        /* What it is one of: a host may take them all (images) */
     return r;
+}
+
+/* Whether object.name is the host's: its object, or a variable that holds one (an integer, not a number's method) */
+static bool host_object(const value_t* v, const char* name)
+{
+    if (v->kind == DMVS_JS_V_OBJECT)
+        return true;
+    return v->kind == DMVS_JS_V_RUNTIME && v->type == DMVS_JS_T_NUMBER && v->scale == 0 && name != NULL &&
+           strcmp(name, "toFixed") != 0 && strcmp(name, "toString") != 0;
 }
 
 /* object.name - static, the host's, a selection's */
 static value_t member(compiler_t* c, const value_t* object, const char* name)
 {
     value_t out = v_undefined();
-    if (object->kind == DMVS_JS_V_OBJECT)
+    if (is_unknown(object))
+        return v_unknown();
+    if (host_object(object, name))
     {
-        if (c->host.get == NULL || c->host.get(c->host.ctx, (dmvs_js_compiler_t)c, object->object, name, &out) != 0)
+        if (c->host.get == NULL || c->host.get(c->host.ctx, (dmvs_js_compiler_t)c, object, name, &out) != 0)
         {
             char m[96];
             Dmod_SnPrintf(m, sizeof(m), "the element's %s - not converted", name);
             report(c, m);
-            return v_undefined();
+            return v_unknown();
         }
         return out;
     }
@@ -685,6 +722,8 @@ static value_t member(compiler_t* c, const value_t* object, const char* name)
 /* object[index] */
 static value_t index_of(compiler_t* c, const value_t* object, const value_t* index)
 {
+    if (is_unknown(object) || is_unknown(index))
+        return v_unknown();
     const object_t* a = as_object(object, O_ARRAY);
     if (is_static(index))
     {
@@ -712,7 +751,7 @@ static value_t index_of(compiler_t* c, const value_t* object, const value_t* ind
         return v_internal(sel);
     }
     report(c, "an index known only when the view runs - not converted");
-    return v_undefined();
+    return v_unknown();
 }
 
 static value_t array_literal(compiler_t* c, scope_t* s, const node_t* n)
@@ -819,7 +858,8 @@ static value_t template_value(compiler_t* c, scope_t* s, const node_t* n)
     value_t parts[32];
     uint32_t count = 0;
     for (const node_t* k = n->a; k != NULL && count < 32u; k = k->next)
-        parts[count++] = (k->kind == DMVS_JS_STRING && k == n->a) ? v_string(c, k->text, k->length) : expression(c, s, k);
+        parts[count++] = (k->kind == DMVS_JS_STRING && k == n->a) ?
+                         ((c->html > 0) ? html_string(c, k->text, k->length) : v_string(c, k->text, k->length)) : expression(c, s, k);
     return concat(c, parts, count);
 }
 
@@ -827,6 +867,8 @@ static value_t template_value(compiler_t* c, scope_t* s, const node_t* n)
 static value_t assign(compiler_t* c, scope_t* s, const node_t* target, uint8_t op, const value_t* value)
 {
     value_t v = *value;
+    if (is_unknown(&v))
+        return v;                                   /* Reported: what it sets stays as it is */
     if (target->kind == DMVS_JS_IDENT)
     {
         binding_t* b = lookup(s, target->text);
@@ -851,7 +893,7 @@ static value_t assign(compiler_t* c, scope_t* s, const node_t* target, uint8_t o
             report(c, "an assignment to a constant - not converted");
             return v;
         }
-        if (c->code == &c->init && c->code->blocks == 0 && is_static(&v))
+        if ((c->evaluate || (c->code == &c->init && c->code->blocks == 0)) && is_static(&v))
         {
             b->value = v;                           /* Still known: while the script loads, outside conditions */
             return v;
@@ -882,9 +924,9 @@ static value_t assign(compiler_t* c, scope_t* s, const node_t* target, uint8_t o
             v = (op == DMVS_JS_OP_ADD && (is_text(&old) || is_text(&v))) ? concat(c, (value_t[]){ old, v }, 2)
                                                                        : arithmetic(c, op, &old, &v);
         }
-        if (object.kind == DMVS_JS_V_OBJECT)
+        if (host_object(&object, name))
         {
-            if (c->host.set == NULL || c->host.set(c->host.ctx, (dmvs_js_compiler_t)c, object.object, name, &v) != 0)
+            if (c->host.set == NULL || c->host.set(c->host.ctx, (dmvs_js_compiler_t)c, &object, name, &v) != 0)
             {
                 char m[96];
                 Dmod_SnPrintf(m, sizeof(m), "setting the element's %s - not converted", name);
@@ -893,7 +935,7 @@ static value_t assign(compiler_t* c, scope_t* s, const node_t* target, uint8_t o
             return v;
         }
         object_t* o = (object_t*)as_object(&object, O_OBJECT);
-        if (o != NULL && c->code == &c->init && c->code->blocks == 0 && is_static(&v))
+        if (o != NULL && (c->evaluate || (c->code == &c->init && c->code->blocks == 0)) && is_static(&v))
         {
             for (uint32_t i = 0; i < o->count; i++)
             {
@@ -932,7 +974,7 @@ static value_t call_expression(compiler_t* c, scope_t* s, const node_t* n)
             if (method == NULL)
             {
                 report(c, "a method known only when the view runs - not converted");
-                return v_undefined();
+                return v_unknown();
             }
         }
     }
@@ -942,17 +984,24 @@ static value_t call_expression(compiler_t* c, scope_t* s, const node_t* n)
         if (a->kind == DMVS_JS_SPREAD || count >= MAX_ARGS)
         {
             report(c, "spread arguments, or too many - not converted");
-            return v_undefined();
+            return v_unknown();
         }
         args[count++] = expression(c, s, a);
     }
     c->at = n;
+    if (is_unknown(&self))
+        return v_unknown();
+    for (uint32_t i = 0; i < count; i++)
+    {
+        if (is_unknown(&args[i]) && method != NULL && host_object(&self, method))
+            return v_unknown();                     /* The host given what is not converted: neither is this */
+    }
 
-    if (method != NULL && self.kind == DMVS_JS_V_OBJECT)
+    if (method != NULL && host_object(&self, method))
     {
         /* The host's method */
         value_t out = v_undefined();
-        if (c->host.call == NULL || c->host.call(c->host.ctx, (dmvs_js_compiler_t)c, self.object, method, args, count, &out) != 0)
+        if (c->host.call == NULL || c->host.call(c->host.ctx, (dmvs_js_compiler_t)c, &self, method, args, count, &out) != 0)
         {
             char m[96];
             Dmod_SnPrintf(m, sizeof(m), "the element's %s() - not converted", method);
@@ -980,7 +1029,7 @@ static value_t expression(compiler_t* c, scope_t* s, const node_t* n)
             return v_number(v);
         }
         case DMVS_JS_STRING:
-            return v_string(c, n->text, n->length);
+            return (c->html > 0) ? html_string(c, n->text, n->length) : v_string(c, n->text, n->length);
         case DMVS_JS_TEMPLATE:
             return template_value(c, s, n);
         case DMVS_JS_BOOL:
@@ -1013,7 +1062,7 @@ static value_t expression(compiler_t* c, scope_t* s, const node_t* n)
             char m[96];
             Dmod_SnPrintf(m, sizeof(m), "the name %s - not converted", n->text);
             report(c, m);
-            return v_undefined();
+            return v_unknown();
         }
         case DMVS_JS_ARRAY:
             return array_literal(c, s, n);
@@ -1039,11 +1088,13 @@ static value_t expression(compiler_t* c, scope_t* s, const node_t* n)
             return call_expression(c, s, n);
         case DMVS_JS_NEW:
             report(c, "new - not converted");
-            return v_undefined();
+            return v_unknown();
         case DMVS_JS_UNARY:
         {
             value_t a = expression(c, s, n->a);
             c->at = n;
+            if (is_unknown(&a) && n->op != DMVS_JS_OP_TYPEOF && n->op != DMVS_JS_OP_VOID)
+                return v_unknown();
             switch (n->op)
             {
                 case DMVS_JS_OP_NOT:
@@ -1082,7 +1133,7 @@ static value_t expression(compiler_t* c, scope_t* s, const node_t* n)
                     return v_undefined();
                 default:
                     report(c, "an operator the compiler does not take - not converted");
-                    return v_undefined();
+                    return v_unknown();
             }
         }
         case DMVS_JS_UPDATE:
@@ -1108,7 +1159,7 @@ static value_t expression(compiler_t* c, scope_t* s, const node_t* n)
             if (n->op == DMVS_JS_OP_IN || n->op == DMVS_JS_OP_INSTANCEOF || n->op >= DMVS_JS_OP_SHL)
             {
                 report(c, "an operator the compiler does not take - not converted");
-                return v_undefined();
+                return v_unknown();
             }
             return arithmetic(c, n->op, &a, &b);
         }
@@ -1116,6 +1167,8 @@ static value_t expression(compiler_t* c, scope_t* s, const node_t* n)
         {
             value_t a = expression(c, s, n->a);
             c->at = n;
+            if (is_unknown(&a))
+                return v_unknown();
             if (is_static(&a))
             {
                 bool nullish = a.kind == DMVS_JS_V_NULL || a.kind == DMVS_JS_V_UNDEFINED;
@@ -1142,10 +1195,14 @@ static value_t expression(compiler_t* c, scope_t* s, const node_t* n)
         {
             test_t t = condition(c, s, n->a);
             c->at = n;
+            if (t.unknown)
+                return v_unknown();
             if (t.kind == 0)
                 return expression(c, s, t.value ? n->b : n->c);
+            dmvsi_var_t which = temp(c, DMVS_JS_T_BOOL);     /* 1: the first, 0: the second (a choice of them) */
             emit_op(c, t.kind, t.var, t.operand, t.imm, NULL);
             c->code->blocks++;
+            emit_op(c, DMVSI_ACT_SET, which, 0, 1, NULL);
             value_t a = expression(c, s, n->b);
             value_t r;
             if (is_text(&a))
@@ -1155,15 +1212,26 @@ static value_t expression(compiler_t* c, scope_t* s, const node_t* n)
                               DMVS_JS_T_BOOL : DMVS_JS_T_NUMBER, FIX, temp(c, DMVS_JS_T_NUMBER));
             assign_to(c, &r, &a);
             emit_op(c, DMVSI_ACT_ELSE, 0, 0, 0, NULL);
+            emit_op(c, DMVSI_ACT_SET, which, 0, 0, NULL);
             value_t b = expression(c, s, n->c);
             assign_to(c, &r, &b);
             c->code->blocks--;
             emit_end(c);
+            if (is_static(&a) && is_static(&b) && a.kind != DMVS_JS_V_INTERNAL && b.kind != DMVS_JS_V_INTERNAL)
+            {
+                value_t picks[2] = { b, a };
+                set_choice(c, &r, picks, 2, which);
+            }
             return r;
         }
         case DMVS_JS_ASSIGN:
         {
+            /* el.innerHTML = '22.0&deg;': its text's character references decoded */
+            const char* target = (n->a->kind == DMVS_JS_MEMBER) ? member_name(n->a) : NULL;
+            bool html = target != NULL && strcmp(target, "innerHTML") == 0;
+            c->html += html ? 1U : 0U;
             value_t v = expression(c, s, n->b);
+            c->html -= html ? 1U : 0U;
             c->at = n;
             return assign(c, s, n->a, n->op, &v);
         }
@@ -1176,7 +1244,7 @@ static value_t expression(compiler_t* c, scope_t* s, const node_t* n)
         }
         default:
             report(c, "an expression the compiler does not take - not converted");
-            return v_undefined();
+            return v_unknown();
     }
 }
 
@@ -1240,9 +1308,9 @@ static void function_body(compiler_t* c, scope_t* s, spec_t* sp)
 
 /* A function's handler for these arguments: made, or made now (fresh: not the one being compiled - a recursive call's) */
 static spec_t* specialize(compiler_t* c, const object_t* f, const value_t* self, const value_t* args, uint32_t count,
-                          bool fresh)
+                          bool fresh, dmvsi_handler_t preset)
 {
-    for (spec_t* sp = c->specs; sp != NULL; sp = sp->next)
+    for (spec_t* sp = c->specs; sp != NULL && !c->evaluate; sp = sp->next)    /* (evaluating: run at every call) */
     {
         if (sp->fn == f && same_args(sp, self, args, count) && !(fresh && sp->compiling))
             return sp;
@@ -1254,6 +1322,7 @@ static spec_t* specialize(compiler_t* c, const object_t* f, const value_t* self,
         return NULL;
     }
     sp->fn = f;
+    sp->handler = preset;                           /* Given out before it is compiled: filled when it is */
     sp->self = *self;
     sp->name = (f->node->text != NULL) ? f->node->text : "fn";
     sp->next = c->specs;
@@ -1271,6 +1340,7 @@ static spec_t* specialize(compiler_t* c, const object_t* f, const value_t* self,
     Dmod_SnPrintf(prefix, sizeof(prefix), "%s%u", sp->name, (unsigned)++serial);
     code->prefix = arena_strndup(&c->arena, prefix, strlen(prefix));
     code->spec = sp;
+    flush_host(c);                                  /* The host's changes kept back are the caller's */
     code->outer = c->code;
     c->code = code;
     sp->compiling = true;
@@ -1325,6 +1395,8 @@ static spec_t* specialize(compiler_t* c, const object_t* f, const value_t* self,
     uint32_t loop_depth = c->loop_depth;
     c->loop_depth = 0;                               /* A break in it is not of the loops around the call */
     function_body(c, s, sp);
+    c->returning = false;
+    flush_host(c);
     c->loop_depth = loop_depth;
 
     c->code = code->outer;
@@ -1350,8 +1422,86 @@ static spec_t* specialize(compiler_t* c, const object_t* f, const value_t* self,
     return sp;
 }
 
+/*
+ * A call of a function's handler: its actions in its place when it is small
+ * (dmview's calls are 8 deep) - a return in it a BREAK of a LOOP around it,
+ * unless it is in a loop of its own (then: a CALL)
+ */
+static void call_or_inline(compiler_t* c, dmvsi_handler_t h)
+{
+    const dmvsi_action_t* a = NULL;
+    uint32_t n = dmvsi_handler_actions(c->doc, h, &a);
+    bool inline_it = n > 0 && n <= MAX_INLINE, returns = false;
+    uint32_t loops = 0;
+    for (uint32_t i = 0; i < n && inline_it; i++)
+    {
+        if (a[i].kind == DMVSI_ACT_LOOP)
+            loops++;
+        else if (a[i].kind == DMVSI_ACT_RETURN)
+        {
+            returns = true;
+            inline_it = loops == 0;
+        }
+        else if (a[i].kind == DMVSI_ACT_END && loops > 0)
+        {
+            /* The END of a loop, or of an IF in it: counted back by what it closes */
+            uint32_t depth = 0;
+            for (uint32_t k = i; k-- > 0;)
+            {
+                if (a[k].kind == DMVSI_ACT_END)
+                    depth++;
+                else if (a[k].kind == DMVSI_ACT_LOOP || a[k].kind == DMVSI_ACT_IF_EQ || a[k].kind == DMVSI_ACT_IF_NE ||
+                         (a[k].kind >= DMVSI_ACT_IF_LT && a[k].kind <= DMVSI_ACT_IF_GE))
+                {
+                    if (depth == 0)
+                    {
+                        if (a[k].kind == DMVSI_ACT_LOOP)
+                            loops--;
+                        break;
+                    }
+                    depth--;
+                }
+            }
+        }
+    }
+    dmvsi_action_t x;
+    memset(&x, 0, sizeof(x));
+    if (!inline_it)
+    {
+        x.kind = DMVSI_ACT_CALL;
+        x.handler = h;
+        emit(c, &x);
+        return;
+    }
+    if (returns)
+    {
+        x.kind = DMVSI_ACT_LOOP;
+        emit(c, &x);
+    }
+    for (uint32_t i = 0; i < n; i++)
+    {
+        x = a[i];
+        if (x.kind == DMVSI_ACT_RETURN)
+        {
+            memset(&x, 0, sizeof(x));
+            x.kind = DMVSI_ACT_BREAK;
+        }
+        emit(c, &x);
+    }
+    if (returns)
+    {
+        memset(&x, 0, sizeof(x));
+        x.kind = DMVSI_ACT_BREAK;
+        emit(c, &x);
+        x.kind = DMVSI_ACT_END;
+        emit(c, &x);
+    }
+}
+
 value_t call_value(compiler_t* c, const value_t* callee, const value_t* self, const value_t* args, uint32_t count)
 {
+    if (is_unknown(callee))
+        return v_unknown();
     const object_t* f = as_object(callee, O_FUNCTION);
     if (f == NULL)
     {
@@ -1359,7 +1509,7 @@ value_t call_value(compiler_t* c, const value_t* callee, const value_t* self, co
         if (b != NULL)
             return builtin_call(c, b, args, count);
         report(c, "a call of what is not a function - not converted");
-        return v_undefined();
+        return v_unknown();
     }
     value_t me = ((f->node->flags & DMVS_JS_F_ARROW) != 0) ? f->self : *self;
     /*
@@ -1373,13 +1523,13 @@ value_t call_value(compiler_t* c, const value_t* callee, const value_t* self, co
         if (sp->fn == f && sp->compiling && same_args(sp, &me, args, count))
             depth++;
     }
-    if (depth > MAX_RECURSION)
+    if (depth > (c->evaluate ? 64u : MAX_RECURSION))
     {
         report(c, "a recursive call deeper than the compiler follows - not converted");
-        return v_undefined();
+        return v_unknown();
     }
     const node_t* at = c->at;
-    spec_t* sp = specialize(c, f, &me, args, count, depth > 0);
+    spec_t* sp = specialize(c, f, &me, args, count, depth > 0 || c->evaluate, 0);
     c->at = at;
     if (sp == NULL)
         return v_undefined();
@@ -1395,13 +1545,7 @@ value_t call_value(compiler_t* c, const value_t* callee, const value_t* self, co
         }
     }
     if (sp->handler != 0)
-    {
-        dmvsi_action_t a;
-        memset(&a, 0, sizeof(a));
-        a.kind = DMVSI_ACT_CALL;
-        a.handler = sp->handler;
-        emit(c, &a);
-    }
+        call_or_inline(c, sp->handler);
     if (!sp->returns)
         return v_undefined();
     if (!sp->ret_runtime)
@@ -1427,16 +1571,59 @@ dmvsi_handler_t function_handler(compiler_t* c, const value_t* fn, const value_t
         return 0;
     }
     value_t me = ((f->node->flags & DMVS_JS_F_ARROW) != 0) ? f->self : *self;
-    const node_t* at = c->at;
-    spec_t* sp = specialize(c, f, &me, NULL, 0, false);
-    c->at = at;
-    if (sp == NULL)
+    deferred_t** end = &c->deferred;
+    for (; *end != NULL; end = &(*end)->next)
+    {
+        if ((*end)->fn == f && (*end)->self.kind == me.kind && same_static(&(*end)->self, &me))
+            return (*end)->handler;
+    }
+    deferred_t* d = arena_alloc(&c->arena, sizeof(deferred_t));
+    if (d == NULL)
+    {
+        c->failed = true;
         return 0;
-    if (sp->handler == 0 && sp->compiling)
-        sp->handler = dmvsi_new_handler(c->doc);                    /* Itself (setTimeout(tick)): made when it is done */
-    else if (sp->handler == 0)
-        sp->handler = dmvsi_add_handler(c->doc, NULL, 0);           /* Nothing to do, but a handler */
-    return sp->handler;
+    }
+    d->fn = f;
+    d->self = me;
+    d->handler = dmvsi_new_handler(c->doc);
+    if (d->handler == 0)
+    {
+        c->failed = true;
+        return 0;
+    }
+    *end = d;
+    return d->handler;
+}
+
+/* The listeners' and timers' functions, as the scripts left everything: into the handlers given out */
+static int compile_deferred(compiler_t* c)
+{
+    for (deferred_t* d = c->deferred; d != NULL; d = d->next)    /* (compiling one may add more) */
+    {
+        if (d->done)
+            continue;
+        d->done = true;
+        c->code = &c->init;
+        c->at = d->fn->node;
+        spec_t* sp = specialize(c, d->fn, &d->self, NULL, 0, false, d->handler);
+        if (sp == NULL)
+            return -ENOMEM;
+        if (sp->handler == d->handler)
+        {
+            if (sp->handler != 0 && !sp->done)
+                (void)dmvsi_set_handler(c->doc, d->handler, NULL, 0);
+            continue;
+        }
+        /* Made before (called directly too): what it does, in the handler given out */
+        const dmvsi_action_t* a = NULL;
+        uint32_t n = (sp->handler != 0) ? dmvsi_handler_actions(c->doc, sp->handler, &a) : 0;
+        if (dmvsi_set_handler(c->doc, d->handler, a, n) != 0)
+        {
+            report(c, "a listener the document does not take - not converted");
+            continue;
+        }
+    }
+    return c->failed ? -ENOMEM : 0;
 }
 
 /* ---- Statements ---- */
@@ -1452,6 +1639,15 @@ static void return_value(compiler_t* c, scope_t* s, const node_t* n)
     }
     value_t v = expression(c, s, n->a);
     c->at = n;
+    if (c->evaluate)
+    {
+        /* As it runs: this is what it returns, the rest is not run */
+        sp->returns = n->a != NULL;
+        sp->ret = v;
+        sp->ret_static_only = true;
+        c->returning = true;
+        return;
+    }
     if (n->a != NULL)
     {
         if (!sp->returns)
@@ -1510,7 +1706,7 @@ static int declarations(compiler_t* c, scope_t* s, const node_t* n)
             continue;
         }
         const char* name = d->a->text;
-        bool constant = n->op == DMVS_JS_VAR_CONST || !assigned_name(c, name);
+        bool constant = n->op == DMVS_JS_VAR_CONST || !assigned_name(c, name) || c->evaluate;
         if (constant && starts_timer(c, s, d->b))
         {
             /* const t = setInterval(() => { ... clearInterval(t) }): its number known before the function is compiled */
@@ -1547,7 +1743,7 @@ static int declarations(compiler_t* c, scope_t* s, const node_t* n)
             type = DMVS_JS_T_TEXT;
         else if (v.kind == DMVS_JS_V_BOOL || (v.kind == DMVS_JS_V_RUNTIME && v.type == DMVS_JS_T_BOOL))
             type = DMVS_JS_T_BOOL;
-        else if (v.kind == DMVS_JS_V_OBJECT || v.kind == DMVS_JS_V_INTERNAL)
+        else if (v.kind == DMVS_JS_V_INTERNAL)
         {
             report(c, "a variable that holds an element or an object and changes - not converted");
             bind(c, s, name, &v, false);
@@ -1577,6 +1773,8 @@ static int declarations(compiler_t* c, scope_t* s, const node_t* n)
             }
         }
         value_t var = v_runtime(type, scale, new_var(c, name, type, initial, text));
+        if (initialized && type == DMVS_JS_T_NUMBER && scale == 0)
+            track(c, var.var, &v);                  /* let current = home: what it may hold */
         if (!initialized && v.kind != DMVS_JS_V_UNDEFINED)
             assign_to(c, &var, &v);
         else if (!initialized && c->code != &c->init)
@@ -1623,6 +1821,11 @@ static int if_statement(compiler_t* c, scope_t* s, const node_t* n)
 {
     test_t t = condition(c, s, n->a);
     c->at = n;
+    if (t.unknown)
+    {
+        release_temps(c);
+        return 0;                                   /* On what is not converted: neither branch */
+    }
     if (t.kind == 0)
     {
         release_temps(c);
@@ -1744,12 +1947,49 @@ static int loop_body(compiler_t* c, scope_t* s, const node_t* body, loop_t* l)
     return 0;
 }
 
+/* Evaluating: a loop as it runs - its test each time (known: everything is), its body, its update */
+static int evaluate_loop(compiler_t* c, scope_t* s, const node_t* init, const node_t* test, const node_t* update,
+                         const node_t* body, bool test_first)
+{
+    if (init != NULL)
+    {
+        if (init->kind == DMVS_JS_VAR)
+            declarations(c, s, init);
+        else
+            (void)expression(c, s, init);
+    }
+    loop_t l;
+    memset(&l, 0, sizeof(l));
+    for (uint32_t k = 0; k < 100000u && !l.broken && !c->returning && !c->failed; k++)
+    {
+        if (test != NULL && (test_first || k > 0))
+        {
+            test_t t = condition(c, s, test);
+            if (t.kind != 0 || t.unknown)
+            {
+                report(c, "a loop on what is not known - not run");
+                break;
+            }
+            if (!t.value)
+                break;
+        }
+        l.continued = false;
+        loop_body(c, s, body, &l);
+        if (update != NULL && !l.broken && !c->returning)
+            (void)expression(c, s, update);
+        release_temps(c);
+    }
+    return 0;
+}
+
 static int for_statement(compiler_t* c, scope_t* s, const node_t* n)
 {
     scope_t* inner = new_scope(c, s, s->spec);
     const char* name = NULL;
     double from = 0, step = 0;
     uint32_t steps = 0;
+    if (c->evaluate && !(unrollable(c, inner, n, &name, &from, &steps, &step) && !sets_name(n->d, name, 0)))
+        return evaluate_loop(c, inner, n->a, n->b, n->c, n->d, true);
     if (!breaks_inside(n->d, true, 0) && unrollable(c, inner, n, &name, &from, &steps, &step) && !sets_name(n->d, name, 0))
     {
         loop_t l;
@@ -1783,7 +2023,7 @@ static int for_statement(compiler_t* c, scope_t* s, const node_t* n)
     {
         test_t t = condition(c, inner, n->b);
         c->at = n;
-        if (t.kind == 0 && !t.value)
+        if (t.kind == 0 && (!t.value || t.unknown))
             emit_op(c, DMVSI_ACT_BREAK, 0, 0, 0, NULL);
         else if (t.kind != 0)
         {
@@ -1807,6 +2047,8 @@ static int for_statement(compiler_t* c, scope_t* s, const node_t* n)
 
 static int while_statement(compiler_t* c, scope_t* s, const node_t* n, bool test_first)
 {
+    if (c->evaluate)
+        return evaluate_loop(c, s, NULL, test_first ? n->a : n->b, NULL, test_first ? n->b : n->a, test_first);
     loop_t l;
     memset(&l, 0, sizeof(l));
     l.runtime = true;
@@ -1819,7 +2061,7 @@ static int while_statement(compiler_t* c, scope_t* s, const node_t* n, bool test
         loop_body(c, s, body, &l);
     test_t t = condition(c, s, test);
     c->at = n;
-    if (t.kind == 0 && !t.value)
+    if (t.kind == 0 && (!t.value || t.unknown))
         emit_op(c, DMVSI_ACT_BREAK, 0, 0, 0, NULL);
     else if (t.kind != 0)
     {
@@ -1876,6 +2118,8 @@ static int switch_statement(compiler_t* c, scope_t* s, const node_t* n)
 {
     value_t d = expression(c, s, n->a);
     c->at = n;
+    if (is_unknown(&d))
+        return 0;
     scope_t* inner = new_scope(c, s, s->spec);
     if (is_static(&d))
     {
@@ -2092,6 +2336,22 @@ dmod_dmvs_js_api_declaration(1.0, int, _scan, ( dmvs_js_compiler_t compiler, dmv
     return (take(c, code) != NULL) ? 0 : -ENOMEM;
 }
 
+dmod_dmvs_js_api_declaration(1.0, dmvs_js_compiler_t, _evaluator_new, ( const dmvs_js_host_t* host ))
+{
+    dmvsi_doc_t doc = dmvsi_new();                  /* What it emits (nothing that matters): its own */
+    if (doc == NULL)
+        return NULL;
+    compiler_t* c = (compiler_t*)dmvs_js_compiler_new(doc, host);
+    if (c == NULL)
+    {
+        dmvsi_free(doc);
+        return NULL;
+    }
+    c->own_doc = true;
+    c->evaluate = true;
+    return (dmvs_js_compiler_t)c;
+}
+
 dmod_dmvs_js_api_declaration(1.0, int, _compile, ( dmvs_js_compiler_t compiler, dmvs_js_ast_t script ))
 {
     compiler_t* c = (compiler_t*)compiler;
@@ -2150,8 +2410,11 @@ dmod_dmvs_js_api_declaration(1.0, int, _finish, ( dmvs_js_compiler_t compiler ))
     compiler_t* c = (compiler_t*)compiler;
     if (c == NULL)
         return -EINVAL;
+    int ret = compile_deferred(c);
     c->code = &c->init;
-    int ret = finish_timers(c);
+    flush_host(c);
+    if (ret == 0)
+        ret = finish_timers(c);
     if (ret == 0 && c->init.count > 0)
     {
         dmvsi_handler_t h = dmvsi_add_handler(c->doc, c->init.actions, c->init.count);
@@ -2171,6 +2434,8 @@ dmod_dmvs_js_api_declaration(1.0, void, _compiler_free, ( dmvs_js_compiler_t com
         return;
     for (const program_t* k = c->programs; k != NULL; k = k->next)
         dmvs_js_free(k->ast);
+    if (c->own_doc)
+        dmvsi_free(c->doc);
     arena_release(&c->arena);
     Dmod_Free(c);
 }
@@ -2227,4 +2492,75 @@ dmod_dmvs_js_api_declaration(1.0, void, _report, ( dmvs_js_compiler_t compiler, 
 {
     if (compiler != NULL && message != NULL)
         report((compiler_t*)compiler, message);
+}
+
+dmod_dmvs_js_api_declaration(1.0, uint32_t, _object_domain, ( dmvs_js_compiler_t compiler, dmvsi_var_t var, uint32_t* objects, uint32_t max ))
+{
+    compiler_t* c = (compiler_t*)compiler;
+    if (c == NULL || var == 0)
+        return 0;
+    /* The variables it is set from, and theirs: their objects */
+    dmvsi_var_t seen[64];
+    uint32_t seen_count = 0, done = 0, count = 0;
+    seen[seen_count++] = var;
+    while (done < seen_count)
+    {
+        dmvsi_var_t v = seen[done++];
+        for (const holds_t* h = c->holds; h != NULL; h = h->next)
+        {
+            if (h->var != v)
+                continue;
+            if (h->from != 0)
+            {
+                bool known = false;
+                for (uint32_t i = 0; i < seen_count && !known; i++)
+                    known = seen[i] == h->from;
+                if (!known && seen_count < sizeof(seen) / sizeof(seen[0]))
+                    seen[seen_count++] = h->from;
+                continue;
+            }
+            bool known = false;
+            for (uint32_t i = 0; i < count && i < max && !known; i++)
+                known = objects[i] == h->object;
+            if (known)
+                continue;
+            if (count < max && objects != NULL)
+                objects[count] = h->object;
+            count++;
+        }
+    }
+    return count;
+}
+
+dmod_dmvs_js_api_declaration(1.0, int, _array, ( dmvs_js_compiler_t compiler, const dmvs_js_value_t* values, uint32_t count, dmvs_js_value_t* array ))
+{
+    compiler_t* c = (compiler_t*)compiler;
+    if (c == NULL || array == NULL || (values == NULL && count > 0))
+        return -EINVAL;
+    object_t* a = new_object(c, O_ARRAY);
+    if (a == NULL)
+        return -ENOMEM;
+    a->values = arena_alloc(&c->arena, (count + 1U) * sizeof(value_t));
+    if (a->values == NULL)
+    {
+        c->failed = true;
+        return -ENOMEM;
+    }
+    if (count > 0)
+        memcpy(a->values, values, count * sizeof(value_t));
+    a->count = count;
+    *array = v_internal(a);
+    return 0;
+}
+
+dmod_dmvs_js_api_declaration(1.0, uint32_t, _choices, ( dmvs_js_compiler_t compiler, const dmvs_js_value_t* value, const dmvs_js_value_t** picks, dmvsi_var_t* index ))
+{
+    const object_t* o = (compiler != NULL && value != NULL) ? choice_of(value) : NULL;
+    if (o == NULL)
+        return 0;
+    if (picks != NULL)
+        *picks = o->values;
+    if (index != NULL)
+        *index = o->index;
+    return o->count;
 }
