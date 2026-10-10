@@ -9,3 +9,8 @@ dmod_add_executable(${DMOD_MODULE_NAME} ${DMOD_MODULE_VERSION}
 )
 
 target_link_libraries(${DMOD_MODULE_NAME} dmvs_js_if)
+
+# dmvs_js.h declares the compiler too: dmvsi's headers
+dmod_link_modules(${DMOD_MODULE_NAME}
+    dmvsi@>=0.4
+)
