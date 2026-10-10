@@ -159,22 +159,49 @@ typedef struct dmvs_js_ast* dmvs_js_ast_t;
 /** Why a script was not parsed. */
 typedef struct
 {
-    int         status;         /**< 0, -EBADMSG (a syntax error), -ENOMEM, -E2BIG (nested too deeply), -EINVAL */
+    int         status;         /**< 0, -EBADMSG (a syntax error), -ENOMEM, -E2BIG (nested too deeply), -EIO (not read), -EINVAL */
     uint32_t    offset;         /**< Where, in the source */
     uint32_t    line;           /**< From 1 */
     uint32_t    column;         /**< From 1, in bytes */
     char        message[96];    /**< e.g. "expected ')'" */
 } dmvs_js_error_t;
 
+/**
+ * Reads the next bytes of a script into `buffer` (at most `size`): how many,
+ * 0 at its end, < 0 when it cannot be read.
+ */
+typedef int32_t (*dmvs_js_read_fn)(void* ctx, char* buffer, size_t size);
+
+/** What a tree took. */
+typedef struct
+{
+    uint32_t    source;         /**< Bytes of the script */
+    uint32_t    window;         /**< The most of it held at once while it was parsed (all of it in memory: its size) */
+    uint32_t    tree;           /**< Bytes of the tree's memory (its nodes and strings) */
+    uint32_t    nodes;
+} dmvs_js_info_t;
+
 /* ---- API ---- */
 
 /**
  * @brief Parse a script (a classic script, not a module).
- * @param source Its text, UTF-8 (not NUL-terminated necessarily)
+ * @param source Its text, UTF-8 (not NUL-terminated necessarily) - the tree does not refer to it
  * @param error  Receives why it was not parsed (may be NULL)
  * @return The tree, NULL on failure
  */
 dmod_dmvs_js_api(1.0, dmvs_js_ast_t, _parse, ( const char* source, size_t length, dmvs_js_error_t* error ));
+
+/**
+ * @brief Parse a script read in pieces - never all of it at once: the
+ *        parser keeps the bytes from the current token (or where a look
+ *        ahead started, at most to the ')' of an arrow function's
+ *        parameters) on. The tree does not refer to the script.
+ * @param read Called for more until it returns 0 (the end) or < 0 (-EIO)
+ */
+dmod_dmvs_js_api(1.0, dmvs_js_ast_t, _parse_stream, ( dmvs_js_read_fn read, void* ctx, dmvs_js_error_t* error ));
+
+/** @brief What a tree took (window, memory, nodes). */
+dmod_dmvs_js_api(1.0, int, _info, ( dmvs_js_ast_t ast, dmvs_js_info_t* info ));
 
 /** @brief The tree's PROGRAM node. */
 dmod_dmvs_js_api(1.0, const dmvs_js_node_t*, _root, ( dmvs_js_ast_t ast ));

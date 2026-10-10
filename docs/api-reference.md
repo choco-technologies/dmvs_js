@@ -6,7 +6,9 @@
 
 | Function | |
 |----------|-|
-| `dmvs_js_parse(source, length, error)` | Parse a script (UTF-8, not NUL-terminated necessarily) into a tree; NULL on failure, `error` (may be NULL) says why and where: `status` `-EBADMSG` (a syntax error), `-E2BIG` (nested deeper than 64), `-ENOMEM`, `-EINVAL`; `line`, `column` (from 1, in bytes), `offset`, `message` |
+| `dmvs_js_parse(source, length, error)` | Parse a script (UTF-8, not NUL-terminated necessarily) into a tree; NULL on failure, `error` (may be NULL) says why and where: `status` `-EBADMSG` (a syntax error), `-E2BIG` (nested deeper than 64), `-EIO` (a stream not read), `-ENOMEM`, `-EINVAL`; `line`, `column` (from 1, in bytes), `offset`, `message` |
+| `dmvs_js_parse_stream(read, ctx, error)` | The same, the script read in pieces: `read(ctx, buffer, size)` returns how many bytes it put in `buffer`, 0 at the end, < 0 when it cannot read (`-EIO`). Only a window of the script is held - from the current token, or where a look ahead started, on |
+| `dmvs_js_info(ast, info)` | What a tree took: `source` (bytes of the script), `window` (the most of it held at once), `tree` (bytes of its memory), `nodes` |
 | `dmvs_js_root(ast)` | The `DMVS_JS_PROGRAM` node |
 | `dmvs_js_free(ast)` | Release the tree and all its nodes and strings |
 | `dmvs_js_dump(node, buffer, size)` | The tree of a node as an S-expression (as `snprintf`: returns the length of all of it) |

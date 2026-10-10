@@ -63,6 +63,7 @@ dmod_add_library(${DMOD_MODULE_NAME} ${DMOD_MODULE_VERSION}
     src/dmvs_js.c
     src/lexer.c
     src/parser.c
+    src/source.c
 )
 
 target_include_directories(${DMOD_MODULE_NAME} PRIVATE

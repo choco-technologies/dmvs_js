@@ -54,21 +54,10 @@ bool lex_failed(const lexer_t* l)
     return l->error->status != 0;
 }
 
-static void fail_status(lexer_t* l, uint32_t offset, int status, const char* message)
+static void fail_status(lexer_t* l, uint32_t offset, uint32_t line, uint32_t column, int status, const char* message)
 {
     if (l->error->status != 0)
         return;                                     /* The first error is the one */
-    uint32_t line = 1, column = 1;
-    for (uint32_t i = 0; i < offset && i < l->length; i++)
-    {
-        if (l->src[i] == '\n')
-        {
-            line++;
-            column = 1;
-        }
-        else
-            column++;
-    }
     l->error->status = status;
     l->error->offset = offset;
     l->error->line = line;
@@ -79,24 +68,24 @@ static void fail_status(lexer_t* l, uint32_t offset, int status, const char* mes
     memcpy(l->error->message, message, n);
     l->error->message[n] = '\0';
     l->tok.kind = T_EOF;
-    l->pos = l->length;
 }
 
 void lex_fail(lexer_t* l, uint32_t offset, const char* message)
 {
-    fail_status(l, offset, -EBADMSG, message);
+    uint32_t column = (offset >= l->line_start) ? offset - l->line_start + 1U : 1U;
+    fail_status(l, offset, l->line, column, -EBADMSG, message);
 }
 
 void lex_fail_at(lexer_t* l, const token_t* t, int status, const char* message)
 {
-    fail_status(l, t->start, status, message);
+    fail_status(l, t->start, t->line, t->column, status, message);
 }
 
 /* ---- Characters ---- */
 
-static char peek(const lexer_t* l, uint32_t ahead)
+static char peek(lexer_t* l, uint32_t ahead)
 {
-    return (l->pos + ahead < l->length) ? l->src[l->pos + ahead] : '\0';
+    return source_at(l->src, l->pos + ahead);
 }
 
 static void newline_at(lexer_t* l, uint32_t after)
@@ -109,9 +98,10 @@ static void newline_at(lexer_t* l, uint32_t after)
 static bool skip_blank(lexer_t* l)
 {
     bool newline = false;
-    while (l->pos < l->length)
+    while (source_more(l->src, l->pos))
     {
-        char c = l->src[l->pos];
+        l->src->keep = l->pos;
+        char c = source_at(l->src, l->pos);
         if (c == '\n')
         {
             l->pos++;
@@ -126,25 +116,29 @@ static bool skip_blank(lexer_t* l)
             l->pos += 3;                            /* A byte order mark */
         else if (c == '/' && peek(l, 1) == '/')
         {
-            while (l->pos < l->length && l->src[l->pos] != '\n')
+            while (source_more(l->src, l->pos) && source_at(l->src, l->pos) != '\n')
                 l->pos++;
         }
         else if (c == '/' && peek(l, 1) == '*')
         {
-            uint32_t start = l->pos;
+            token_t at;
+            memset(&at, 0, sizeof(at));
+            at.start = l->pos;
+            at.line = l->line;
+            at.column = l->pos - l->line_start + 1U;
             l->pos += 2;
-            while (l->pos < l->length && !(l->src[l->pos] == '*' && peek(l, 1) == '/'))
+            while (source_more(l->src, l->pos) && !(source_at(l->src, l->pos) == '*' && peek(l, 1) == '/'))
             {
-                if (l->src[l->pos] == '\n')
+                if (source_at(l->src, l->pos) == '\n')
                 {
                     newline_at(l, l->pos + 1U);
                     newline = true;
                 }
                 l->pos++;
             }
-            if (l->pos >= l->length)
+            if (!source_more(l->src, l->pos))
             {
-                lex_fail(l, start, "unterminated comment");
+                lex_fail_at(l, &at, -EBADMSG, "unterminated comment");
                 return newline;
             }
             l->pos += 2;
@@ -224,29 +218,31 @@ static bool decode(lexer_t* l, char quote, token_t* t)
     uint32_t start = l->pos;
     /* Where it ends (escapes skipped): decoded, it is never longer */
     uint32_t end = l->pos;
-    while (end < l->length && l->src[end] != quote && !(quote == '`' && l->src[end] == '$' && end + 1U < l->length &&
-                                                       l->src[end + 1U] == '{'))
-        end += (l->src[end] == '\\') ? 2U : 1U;
-    if (end > l->length)
-        end = l->length;
+    while (source_more(l->src, end))
+    {
+        char c = source_at(l->src, end);
+        if (c == quote || (quote == '`' && c == '$' && source_at(l->src, end + 1U) == '{'))
+            break;
+        end += (c == '\\' && source_more(l->src, end + 1U)) ? 2U : 1U;
+    }
     char* out = arena_alloc(l->arena, (size_t)(end - start) + 4U);
     if (out == NULL)
     {
-        fail_status(l, start, -ENOMEM, "out of memory");
+        fail_status(l, start, t->line, t->column, -ENOMEM, "out of memory");
         return false;
     }
     size_t n = 0;
     uint32_t pending_high = 0;                      /* A high surrogate waiting for its low one */
-    while (l->pos < l->length)
+    while (source_more(l->src, l->pos))
     {
-        char c = l->src[l->pos];
+        char c = source_at(l->src, l->pos);
         if (c == quote || (quote == '`' && c == '$' && peek(l, 1) == '{'))
             break;
         if (c == '\n')
         {
             if (quote != '`')
             {
-                lex_fail(l, start - 1U, "unterminated string");
+                lex_fail_at(l, t, -EBADMSG, "unterminated string");
                 return false;
             }
             newline_at(l, l->pos + 1U);
@@ -311,11 +307,11 @@ static bool decode(lexer_t* l, char quote, token_t* t)
                 newline_at(l, l->pos);
                 break;
             case '\0':
-                lex_fail(l, start - 1U, "unterminated string");
+                lex_fail_at(l, t, -EBADMSG, "unterminated string");
                 return false;
             default:
                 l->pos--;                           /* Any other character stands for itself (UTF-8 bytes too) */
-                out[n++] = l->src[l->pos++];
+                out[n++] = source_at(l->src, l->pos++);
                 break;
         }
         if (!code)
@@ -337,9 +333,9 @@ static bool decode(lexer_t* l, char quote, token_t* t)
     }
     if (pending_high != 0)
         n += put_utf8(out + n, 0xFFFDu);
-    if (l->pos >= l->length)
+    if (!source_more(l->src, l->pos))
     {
-        lex_fail(l, start - 1U, (quote == '`') ? "unterminated template" : "unterminated string");
+        lex_fail_at(l, t, -EBADMSG, (quote == '`') ? "unterminated template" : "unterminated string");
         return false;
     }
     out[n] = '\0';
@@ -353,7 +349,7 @@ static void template_chunk(lexer_t* l, token_t* t)
     t->kind = T_TEMPLATE;
     if (!decode(l, '`', t))
         return;
-    if (l->src[l->pos] == '`')
+    if (source_at(l->src, l->pos) == '`')
     {
         t->tail = true;
         l->pos++;
@@ -504,8 +500,10 @@ static void number(lexer_t* l, token_t* t)
 
 static bool punct(lexer_t* l, token_t* t)
 {
-    const char* s = l->src + l->pos;
-    uint32_t left = l->length - l->pos;
+    uint32_t left = 0;
+    while (left < 4u && source_more(l->src, l->pos + left))
+        left++;
+    const char* s = source_text(l->src, l->pos);        /* The 4 bytes (or fewer, at the end) are there */
     if ((left >= 4 && in_list(g_punct4, s, 4)) || (left >= 3 && in_list(g_punct3, s, 3)) ||
         (left >= 2 && in_list(g_punct2, s, 2) && !(s[0] == '?' && s[1] == '.' && left >= 3 && is_digit(s[2]))))
     {
@@ -513,7 +511,7 @@ static bool punct(lexer_t* l, token_t* t)
         t->kind = T_PUNCT;
         return true;
     }
-    if (strchr(g_punct1, s[0]) != NULL && s[0] != '\0')
+    if (left > 0 && s[0] != '\0' && strchr(g_punct1, s[0]) != NULL)
     {
         l->pos++;
         t->kind = T_PUNCT;
@@ -559,6 +557,7 @@ void lex_next(lexer_t* l)
         l->tok = t;
         return;
     }
+    l->src->keep = l->pos;                          /* The token before is not needed again */
     t.newline = skip_blank(l);
     t.start = l->pos;
     t.line = l->line;
@@ -570,7 +569,7 @@ void lex_next(lexer_t* l)
     }
 
     char c = peek(l, 0);
-    if (l->pos >= l->length)
+    if (!source_more(l->src, l->pos))
         t.kind = T_EOF;
     else if (name_start(c) || (c == '#' && name_start(peek(l, 1))))
     {
@@ -610,7 +609,7 @@ void lex_next(lexer_t* l)
     }
 
     /* Whether a '/' after it starts a regular expression */
-    const char* s = l->src + t.start;
+    const char* s = source_text(l->src, t.start);
     size_t n = t.end - t.start;
     if (t.kind == T_NAME)
         l->regex_ok = in_list(g_regex_after, s, n);
@@ -623,28 +622,46 @@ void lex_next(lexer_t* l)
     l->tok = t;
 }
 
-void lex_init(lexer_t* l, const char* src, size_t length, arena_t* arena, dmvs_js_error_t* error)
+void lex_init(lexer_t* l, source_t* src, arena_t* arena, dmvs_js_error_t* error)
 {
     memset(l, 0, sizeof(*l));
     l->src = src;
-    l->length = (uint32_t)length;
     l->line = 1;
     l->regex_ok = true;
     l->arena = arena;
     l->error = error;
-    if (length > 2 && src[0] == '#' && src[1] == '!')       /* A hashbang line */
+    if (source_at(src, 0) == '#' && source_at(src, 1) == '!')         /* A hashbang line */
     {
-        while (l->pos < l->length && src[l->pos] != '\n')
+        while (source_more(src, l->pos) && source_at(src, l->pos) != '\n')
             l->pos++;
     }
     lex_next(l);
+}
+
+const char* lex_token_text(const lexer_t* l)
+{
+    return source_text(l->src, l->tok.start);
+}
+
+void lex_save(const lexer_t* l, lexer_t* saved)
+{
+    *saved = *l;
+    source_mark(l->src, l->tok.start);
+}
+
+void lex_restore(lexer_t* l, const lexer_t* saved)
+{
+    *l = *saved;
+    source_unmark(l->src);
+    if (l->src->keep > l->tok.start)
+        l->src->keep = l->tok.start;                /* Its token is the current one again */
 }
 
 bool tok_is(const lexer_t* l, const char* text)
 {
     size_t n = strlen(text);
     return (l->tok.kind == T_PUNCT || l->tok.kind == T_NAME) && l->tok.end - l->tok.start == n &&
-           strncmp(l->src + l->tok.start, text, n) == 0;
+           strncmp(source_text(l->src, l->tok.start), text, n) == 0;
 }
 
 bool tok_name(const lexer_t* l, const char* name)

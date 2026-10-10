@@ -12,6 +12,7 @@ struct dmvs_js_ast
 {
     arena_t                 arena;
     const dmvs_js_node_t*   root;
+    dmvs_js_info_t          info;
 };
 
 /* ---- Arena ---- */
@@ -99,6 +100,41 @@ dmod_dmvs_js_api_declaration(1.0, const char*, _op_name, ( uint8_t op ))
 
 /* ---- Parsing ---- */
 
+/* Nodes of a tree */
+static uint32_t count(const dmvs_js_node_t* n, uint32_t depth)
+{
+    uint32_t total = 0;
+    for (; n != NULL && depth < 256u; n = n->next)
+        total += 1u + count(n->a, depth + 1U) + count(n->b, depth + 1U) + count(n->c, depth + 1U) + count(n->d, depth + 1U);
+    return total;
+}
+
+static dmvs_js_ast_t parse(source_t* source, dmvs_js_error_t* error)
+{
+    struct dmvs_js_ast* ast = Dmod_Malloc(sizeof(*ast));
+    if (ast == NULL)
+    {
+        error->status = -ENOMEM;
+        return NULL;
+    }
+    memset(ast, 0, sizeof(*ast));
+    ast->root = parse_program(&ast->arena, source, error);
+    if (ast->root == NULL)
+    {
+        if (error->status == 0)
+            error->status = -ENOMEM;
+        arena_release(&ast->arena);
+        Dmod_Free(ast);
+        return NULL;
+    }
+    ast->info.source = ast->root->end;
+    ast->info.window = source->peak;
+    for (const chunk_t* c = ast->arena.chunks; c != NULL; c = c->next)
+        ast->info.tree += (uint32_t)(sizeof(chunk_t) + c->size);
+    ast->info.nodes = count(ast->root, 0);
+    return ast;
+}
+
 dmod_dmvs_js_api_declaration(1.0, dmvs_js_ast_t, _parse, ( const char* source, size_t length, dmvs_js_error_t* error ))
 {
     dmvs_js_error_t ignored;
@@ -110,23 +146,35 @@ dmod_dmvs_js_api_declaration(1.0, dmvs_js_ast_t, _parse, ( const char* source, s
         error->status = -EINVAL;
         return NULL;
     }
-    struct dmvs_js_ast* ast = Dmod_Malloc(sizeof(*ast));
-    if (ast == NULL)
+    source_t s;
+    source_memory(&s, source, length);
+    return parse(&s, error);
+}
+
+dmod_dmvs_js_api_declaration(1.0, dmvs_js_ast_t, _parse_stream, ( dmvs_js_read_fn read, void* ctx, dmvs_js_error_t* error ))
+{
+    dmvs_js_error_t ignored;
+    if (error == NULL)
+        error = &ignored;
+    memset(error, 0, sizeof(*error));
+    if (read == NULL)
     {
-        error->status = -ENOMEM;
+        error->status = -EINVAL;
         return NULL;
     }
-    memset(ast, 0, sizeof(*ast));
-    ast->root = parse_program(&ast->arena, source, length, error);
-    if (ast->root == NULL)
-    {
-        if (error->status == 0)
-            error->status = -ENOMEM;
-        arena_release(&ast->arena);
-        Dmod_Free(ast);
-        return NULL;
-    }
+    source_t s;
+    source_stream(&s, read, ctx);
+    dmvs_js_ast_t ast = parse(&s, error);
+    source_release(&s);
     return ast;
+}
+
+dmod_dmvs_js_api_declaration(1.0, int, _info, ( dmvs_js_ast_t ast, dmvs_js_info_t* info ))
+{
+    if (ast == NULL || info == NULL)
+        return -EINVAL;
+    *info = ast->info;
+    return 0;
 }
 
 dmod_dmvs_js_api_declaration(1.0, const dmvs_js_node_t*, _root, ( dmvs_js_ast_t ast ))

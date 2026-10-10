@@ -123,7 +123,7 @@ static void take_text(parser_t* p, node_t* n)
     if (n == NULL)
         return;
     size_t len = p->lx.tok.end - p->lx.tok.start;
-    n->text = arena_strndup(p->arena, p->lx.src + p->lx.tok.start, len);
+    n->text = arena_strndup(p->arena, lex_token_text(&p->lx), len);
     n->length = len;
     if (n->text == NULL)
         lex_fail_at(&p->lx, &p->lx.tok, -ENOMEM, "out of memory");
@@ -160,7 +160,7 @@ static bool at_identifier(const parser_t* p)
 {
     if (p->lx.tok.kind != T_NAME)
         return false;
-    const char* s = p->lx.src + p->lx.tok.start;
+    const char* s = lex_token_text(&p->lx);
     size_t n = p->lx.tok.end - p->lx.tok.start;
     if (is_keyword(s, n))
         return false;
@@ -226,19 +226,39 @@ static bool valid_target(const node_t* n)
 
 /* ---- Looking ahead ---- */
 
-/* At '(': whether the matching ')' is followed by '=>' (an arrow function's parameters) */
+/*
+ * At '(': whether the matching ')' is followed by '=>' (an arrow function's
+ * parameters). Right inside the parentheses parameters are names, ',',
+ * '...', patterns and defaults: anything else - (function () { ... }),
+ * (a.b), (1 + x) - ends the look ahead at once, so that it does not read
+ * a whole program wrapped in parentheses.
+ */
 static __attribute__((noinline)) bool arrow_ahead(parser_t* p)
 {
-    lexer_t saved = p->lx;
+    lexer_t saved;
     dmvs_js_error_t error = *p->lx.error;
+    lex_save(&p->lx, &saved);
     char stack[MAX_DEPTH];
     uint32_t depth = 0;
     bool arrow = false;
+    bool in_default = false;                        /* After '=' of a parameter: any expression up to ',' */
     for (;;)
     {
         const token_t* t = &p->lx.tok;
         if (t->kind == T_EOF)
             break;
+        if (depth == 1 && !in_default)
+        {
+            bool fits = at_identifier(p) || is(p, ",") || is(p, "...") || is(p, "=") || is(p, "[") || is(p, "{") ||
+                        is(p, ")");
+            if (!fits)
+                break;
+            if (is(p, "="))
+                in_default = true;
+        }
+        else if (depth == 1 && is(p, ","))
+            in_default = false;
+
         if (t->kind == T_TEMPLATE && !t->tail)
         {
             if (depth >= MAX_DEPTH)
@@ -249,7 +269,7 @@ static __attribute__((noinline)) bool arrow_ahead(parser_t* p)
         {
             if (depth >= MAX_DEPTH)
                 break;
-            stack[depth++] = p->lx.src[t->start];
+            stack[depth++] = lex_token_text(&p->lx)[0];
         }
         else if (t->kind == T_PUNCT && (is(p, ")") || is(p, "]") || is(p, "}")))
         {
@@ -273,7 +293,7 @@ static __attribute__((noinline)) bool arrow_ahead(parser_t* p)
         }
         lex_next(&p->lx);
     }
-    p->lx = saved;
+    lex_restore(&p->lx, &saved);
     *p->lx.error = error;
     return arrow;
 }
@@ -281,11 +301,12 @@ static __attribute__((noinline)) bool arrow_ahead(parser_t* p)
 /* The token after the current one is this punctuation / name */
 static __attribute__((noinline)) bool next_is(parser_t* p, const char* text, bool same_line)
 {
-    lexer_t saved = p->lx;
+    lexer_t saved;
     dmvs_js_error_t error = *p->lx.error;
+    lex_save(&p->lx, &saved);
     lex_next(&p->lx);
     bool yes = is(p, text) && (!same_line || !p->lx.tok.newline);
-    p->lx = saved;
+    lex_restore(&p->lx, &saved);
     *p->lx.error = error;
     return yes;
 }
@@ -293,11 +314,12 @@ static __attribute__((noinline)) bool next_is(parser_t* p, const char* text, boo
 /* At 'async': an async arrow function follows - async (...) => / async x => */
 static __attribute__((noinline)) bool async_arrow_ahead(parser_t* p)
 {
-    lexer_t saved = p->lx;
+    lexer_t saved;
     dmvs_js_error_t error = *p->lx.error;
+    lex_save(&p->lx, &saved);
     lex_next(&p->lx);
     bool yes = !p->lx.tok.newline && ((is(p, "(") && arrow_ahead(p)) || (at_identifier(p) && next_is(p, "=>", true)));
-    p->lx = saved;
+    lex_restore(&p->lx, &saved);
     *p->lx.error = error;
     return yes;
 }
@@ -573,12 +595,13 @@ static __attribute__((noinline)) bool modifier(parser_t* p, const char* word)
 {
     if (!tok_name(&p->lx, word))
         return false;
-    lexer_t saved = p->lx;
+    lexer_t saved;
     dmvs_js_error_t error = *p->lx.error;
+    lex_save(&p->lx, &saved);
     lex_next(&p->lx);
     bool key = !p->lx.tok.newline && !(is(p, ",") || is(p, ":") || is(p, "(") || is(p, "}") || is(p, "=") || is(p, ";")) &&
                p->lx.tok.kind != T_EOF;
-    p->lx = saved;
+    lex_restore(&p->lx, &saved);
     *p->lx.error = error;
     if (key)
         advance(p);
@@ -1266,11 +1289,12 @@ static __attribute__((noinline)) bool at_let(parser_t* p)
 {
     if (!tok_name(&p->lx, "let"))
         return false;
-    lexer_t saved = p->lx;
+    lexer_t saved;
     dmvs_js_error_t error = *p->lx.error;
+    lex_save(&p->lx, &saved);
     lex_next(&p->lx);
     bool yes = p->lx.tok.kind == T_NAME || is(p, "[") || is(p, "{");
-    p->lx = saved;
+    lex_restore(&p->lx, &saved);
     *p->lx.error = error;
     return yes;
 }
@@ -1583,7 +1607,7 @@ static node_t* statement(parser_t* p)
 
 /* ---- The program ---- */
 
-node_t* parse_program(arena_t* arena, const char* source, size_t length, dmvs_js_error_t* error)
+node_t* parse_program(arena_t* arena, source_t* source, dmvs_js_error_t* error)
 {
     parser_t* p = Dmod_Malloc(sizeof(*p));          /* Not on the stack of a small target */
     if (p == NULL)
@@ -1593,7 +1617,7 @@ node_t* parse_program(arena_t* arena, const char* source, size_t length, dmvs_js
     }
     memset(p, 0, sizeof(*p));
     p->arena = arena;
-    lex_init(&p->lx, source, length, arena, error);
+    lex_init(&p->lx, source, arena, error);
 
     token_t start = p->lx.tok;
     start.start = 0;
@@ -1607,9 +1631,18 @@ node_t* parse_program(arena_t* arena, const char* source, size_t length, dmvs_js
     if (program != NULL)
     {
         program->a = head;
-        program->end = (uint32_t)length;
+        program->end = p->lx.pos;
     }
-    bool ok = !failed(p) && !arena->failed;
+    if (source->failed != 0)
+    {
+        /* Reading stopped: whatever the parser made of the rest is not the script */
+        error->status = source->failed;
+        error->offset = p->lx.pos;
+        error->line = p->lx.line;
+        error->column = p->lx.pos - p->lx.line_start + 1U;
+        strcpy(error->message, (source->failed == -EIO) ? "cannot read the script" : "out of memory");
+    }
+    bool ok = error->status == 0 && !arena->failed;
     Dmod_Free(p);
     return ok ? program : NULL;
 }

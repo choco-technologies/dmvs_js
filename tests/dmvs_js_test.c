@@ -251,3 +251,70 @@ DMOD_TEST_STEP(dmvs_js_keeps_where_nodes_are)
     }
     dmvs_js_free(ast);
 }
+
+/* ---- Streams ---- */
+
+typedef struct
+{
+    const char* text;
+    size_t      length;
+    size_t      pos;
+    uint32_t    turn;           /* Pieces of 1 ... 7 bytes, by turns */
+    size_t      fail_at;        /* Reading fails there (0: never) */
+} stream_t;
+
+static int32_t read_piece(void* ctx, char* buffer, size_t size)
+{
+    stream_t* s = ctx;
+    if (s->fail_at != 0 && s->pos >= s->fail_at)
+        return -EIO;
+    size_t n = 1u + (s->turn++ % 7u);
+    if (n > size)
+        n = size;
+    if (n > s->length - s->pos)
+        n = s->length - s->pos;
+    memcpy(buffer, s->text + s->pos, n);
+    s->pos += n;
+    return (int32_t)n;
+}
+
+DMOD_TEST_STEP(dmvs_js_parses_streams)
+{
+    /* The car HMI's script, in pieces of 1 ... 7 bytes: acorn's tree, never all of it at once */
+    size_t n = read_fixture("car_hmi.js", g_file, sizeof(g_file));
+    size_t m = read_fixture("car_hmi.tree", g_expected, sizeof(g_expected));
+    DMOD_TEST_EXPECT_TRUE(n > 0 && m > 0);
+    stream_t s = { g_file, n, 0, 0, 0 };
+    dmvs_js_error_t e;
+    dmvs_js_ast_t ast = dmvs_js_parse_stream(read_piece, &s, &e);
+    DMOD_TEST_EXPECT_TRUE(ast != NULL);
+    if (ast == NULL)
+        return;
+    static char mine[32768];
+    size_t length = dmvs_js_dump(dmvs_js_root(ast), mine, sizeof(mine));
+    DMOD_TEST_EXPECT_TRUE(length == m && memcmp(mine, g_expected, m) == 0);
+    dmvs_js_info_t info;
+    DMOD_TEST_EXPECT_EQ(dmvs_js_info(ast, &info), 0);
+    DMOD_TEST_EXPECT_EQ(info.source, (uint32_t)n);
+    DMOD_TEST_EXPECT_TRUE(info.window < 1024u);            /* Of 10.9 KB */
+    DMOD_TEST_EXPECT_EQ(info.nodes, 1014u);
+    dmvs_js_free(ast);
+
+    /* A program wrapped in parentheses is not read whole to tell it from arrow parameters */
+    static char wrapped[8192];
+    size_t k = 0;
+    k += (size_t)Dmod_SnPrintf(wrapped + k, sizeof(wrapped) - k, "(function () {\n");
+    for (int i = 0; i < 200 && k + 64 < sizeof(wrapped); i++)
+        k += (size_t)Dmod_SnPrintf(wrapped + k, sizeof(wrapped) - k, "  var v%d = f(%d, 'x');\n", i, i);
+    k += (size_t)Dmod_SnPrintf(wrapped + k, sizeof(wrapped) - k, "})();\n");
+    stream_t w = { wrapped, k, 0, 0, 0 };
+    ast = dmvs_js_parse_stream(read_piece, &w, &e);
+    DMOD_TEST_EXPECT_TRUE(ast != NULL && dmvs_js_info(ast, &info) == 0 && info.window < 256u);
+    dmvs_js_free(ast);
+
+    /* Reading fails: -EIO, where it stopped */
+    stream_t f = { g_file, n, 0, 0, 500 };
+    DMOD_TEST_EXPECT_TRUE(dmvs_js_parse_stream(read_piece, &f, &e) == NULL);
+    DMOD_TEST_EXPECT_EQ(e.status, -EIO);
+    DMOD_TEST_EXPECT_TRUE(e.offset >= 400u && e.offset <= 510u);
+}
