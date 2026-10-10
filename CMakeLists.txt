@@ -64,6 +64,9 @@ dmod_add_library(${DMOD_MODULE_NAME} ${DMOD_MODULE_VERSION}
     src/lexer.c
     src/parser.c
     src/source.c
+    src/compile.c
+    src/values.c
+    src/builtins.c
 )
 
 target_include_directories(${DMOD_MODULE_NAME} PRIVATE
@@ -74,10 +77,9 @@ target_include_directories(${DMOD_MODULE_NAME}_if INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
-# To depend on another module's headers, use:
-#   dmod_link_modules(${DMOD_MODULE_NAME}
-#       other_module@1.0
-#   )
+dmod_link_modules(${DMOD_MODULE_NAME}
+    dmvsi@>=0.4
+)
 enable_testing()
 add_subdirectory(apps/jsdump)
 add_subdirectory(tests)

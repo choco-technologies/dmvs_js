@@ -222,4 +222,141 @@ dmod_dmvs_js_api(1.0, const char*, _kind_name, ( uint8_t kind ));
 /** @brief An operator as written, e.g. "+" ("+=" is DMVS_JS_OP_ADD of an ASSIGN) - "?" for none. */
 dmod_dmvs_js_api(1.0, const char*, _op_name, ( uint8_t op ));
 
+/* ---- Compiling ---- */
+
+/*
+ * A page's scripts compiled into a dmvsi document's code: what they do when
+ * they load becomes the view's init handler; their functions handlers (of
+ * clicks, of timers); their variables the view's. What is known when the
+ * page is converted is computed then - elements, constant data, unrolled
+ * forEach - and only what changes while the view runs is code.
+ *
+ * Numbers that may hold fractions are fixed point (1/1000, DMVS_JS_SCALE),
+ * the others integers; booleans 0 / 1; strings text variables.
+ *
+ * The DOM is the host's (dmvs_html): the compiler asks it for the globals
+ * it does not know (document), and hands it what scripts do with its
+ * objects - it emits the actions that do it.
+ */
+
+#include "dmvsi.h"
+
+typedef struct dmvs_js_compiler* dmvs_js_compiler_t;
+
+#define DMVS_JS_SCALE       3u          /**< Decimals of a fixed-point number (value * 1000) */
+
+/* What a value is */
+#define DMVS_JS_V_UNDEFINED 0u
+#define DMVS_JS_V_NULL      1u
+#define DMVS_JS_V_BOOL      2u          /**< `number`: 0 or 1 */
+#define DMVS_JS_V_NUMBER    3u          /**< `number` */
+#define DMVS_JS_V_STRING    4u          /**< `text`, `length` */
+#define DMVS_JS_V_OBJECT    5u          /**< The host's: `object` */
+#define DMVS_JS_V_RUNTIME   6u          /**< Known when the view runs: the variable `var` of `type` */
+#define DMVS_JS_V_INTERNAL  7u          /**< The compiler's own (a function, an array, ...): `internal` */
+
+/* What a runtime value is */
+#define DMVS_JS_T_NUMBER    0u          /**< `var` holds the number * 10^scale */
+#define DMVS_JS_T_BOOL      1u          /**< 0 or 1 */
+#define DMVS_JS_T_TEXT      2u          /**< A text variable */
+
+typedef struct
+{
+    uint8_t         kind;               /**< DMVS_JS_V_* */
+    uint8_t         type;               /**< RUNTIME: DMVS_JS_T_* */
+    uint8_t         scale;              /**< RUNTIME number: 0 (an integer) or DMVS_JS_SCALE */
+    dmvsi_var_t     var;                /**< RUNTIME */
+    dmvsi_var_t     number_var;         /**< RUNTIME text made of a number (e.g. "22.5°"): that number (at DMVS_JS_SCALE), 0: none */
+    double          number;             /**< BOOL, NUMBER */
+    const char*     text;               /**< STRING (UTF-8) */
+    size_t          length;
+    uint32_t        object;             /**< OBJECT: the host's handle */
+    const void*     internal;           /**< INTERNAL */
+} dmvs_js_value_t;
+
+/**
+ * The DOM, by the host. Each returns 0, or -ENOTSUP for what it does not
+ * do (the compiler reports it). While it handles get / set / call it may
+ * emit actions into the code being compiled (dmvs_js_emit()).
+ */
+typedef struct
+{
+    void*   ctx;
+    /** A global the compiler does not know (document, window): false when the host has none */
+    bool    (*global)(void* ctx, dmvs_js_compiler_t c, const char* name, dmvs_js_value_t* value);
+    /** object.name */
+    int     (*get)(void* ctx, dmvs_js_compiler_t c, uint32_t object, const char* name, dmvs_js_value_t* value);
+    /** object.name = value */
+    int     (*set)(void* ctx, dmvs_js_compiler_t c, uint32_t object, const char* name, const dmvs_js_value_t* value);
+    /** object.method(args) */
+    int     (*call)(void* ctx, dmvs_js_compiler_t c, uint32_t object, const char* method, const dmvs_js_value_t* args,
+                    uint32_t count, dmvs_js_value_t* result);
+    /** What is not compiled, and where */
+    void    (*report)(void* ctx, uint32_t line, uint32_t column, const char* message);
+} dmvs_js_host_t;
+
+/** @brief A compiler of scripts into a document's code (the host copied). NULL on failure */
+dmod_dmvs_js_api(1.0, dmvs_js_compiler_t, _compiler_new, ( dmvsi_doc_t doc, const dmvs_js_host_t* host ));
+
+/**
+ * @brief Show the compiler code before it is compiled: what it assigns is
+ *        a variable, not a constant, for the code compiled before it too -
+ *        the onclick="..." code of a page, scanned before its scripts.
+ *        The compiler keeps the tree (freed with it). @return 0, -ENOMEM
+ */
+dmod_dmvs_js_api(1.0, int, _scan, ( dmvs_js_compiler_t c, dmvs_js_ast_t code ));
+
+/**
+ * @brief Compile a script: run what it does when it loads (into the init
+ *        handler). Scripts share their global scope, in the order compiled.
+ *        The compiler keeps the tree (its functions are compiled when they
+ *        are used) - it is freed with the compiler.
+ * @return 0, -ENOMEM; what is not compiled is reported (the rest is)
+ */
+dmod_dmvs_js_api(1.0, int, _compile, ( dmvs_js_compiler_t c, dmvs_js_ast_t script ));
+
+/** @brief Compile a piece of code as a handler (an onclick="..." attribute), `this` its object - the tree kept. 0 on failure */
+dmod_dmvs_js_api(1.0, dmvsi_handler_t, _compile_handler, ( dmvs_js_compiler_t c, dmvs_js_ast_t code, uint32_t this_object ));
+
+/** @brief The end: the init handler and the timers into the document. @return 0, -ENOMEM */
+dmod_dmvs_js_api(1.0, int, _finish, ( dmvs_js_compiler_t c ));
+
+/** @brief Release a compiler and the trees it was given (its document stays). Safe on NULL. */
+dmod_dmvs_js_api(1.0, void, _compiler_free, ( dmvs_js_compiler_t c ));
+
+/** @brief How many things were reported (not compiled). */
+dmod_dmvs_js_api(1.0, uint32_t, _reports, ( dmvs_js_compiler_t c ));
+
+/* For the host, while it handles get / set / call */
+
+/** @brief An action into the code being compiled. @return 0, -ENOMEM */
+dmod_dmvs_js_api(1.0, int, _emit, ( dmvs_js_compiler_t c, const dmvsi_action_t* action ));
+
+/**
+ * @brief A value as an action's operand: a number at `scale` (0 or
+ *        DMVS_JS_SCALE) - in `var` (a variable; a runtime value of another
+ *        scale is converted into a temporary) or `value` (var = 0).
+ * @return 0, -EINVAL (not a number / boolean)
+ */
+dmod_dmvs_js_api(1.0, int, _number_operand, ( dmvs_js_compiler_t c, const dmvs_js_value_t* v, uint8_t scale, dmvsi_var_t* var, int32_t* value ));
+
+/** @brief A value as text: a static string's (*text), or a text variable that holds it (var). @return 0, -EINVAL */
+dmod_dmvs_js_api(1.0, int, _text_operand, ( dmvs_js_compiler_t c, const dmvs_js_value_t* v, dmvsi_var_t* var, const char** text ));
+
+/** @brief Whether a static value is truthy (JavaScript's); false for runtime values. */
+dmod_dmvs_js_api(1.0, bool, _truthy, ( const dmvs_js_value_t* v ));
+
+/**
+ * @brief A function value as a handler - a listener: run with `this` as
+ *        `this_object` (0: undefined) and no arguments.
+ * @return The handler, 0 when it is not a function (or not compiled)
+ */
+dmod_dmvs_js_api(1.0, dmvsi_handler_t, _function_handler, ( dmvs_js_compiler_t c, const dmvs_js_value_t* function, uint32_t this_object ));
+
+/** @brief A static string's number as parseFloat() reads it (NaN: false). */
+dmod_dmvs_js_api(1.0, bool, _parse_number, ( const char* text, size_t length, double* number ));
+
+/** @brief Report what is not compiled at the node being compiled. */
+dmod_dmvs_js_api(1.0, void, _report, ( dmvs_js_compiler_t c, const char* message ));
+
 #endif /* DMVS_JS_H */

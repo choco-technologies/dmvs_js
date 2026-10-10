@@ -5,8 +5,9 @@
 
 JavaScript for dmview views. A page's scripts are compiled into the view's
 own code (dmvs) - nothing interprets JavaScript on the device. This module
-is that compiler's front end: a parser of the JavaScript pages use into a
-syntax tree.
+is that compiler: a parser of the JavaScript pages use into a syntax tree,
+and a compiler of the trees into a dmvsi document's code (handlers,
+variables, timers) that todmvs writes as a view.
 
 ## The parser
 
@@ -40,6 +41,19 @@ syntax tree.
 The tree is the one [acorn](https://github.com/acornjs/acorn) makes, node
 for node: lodash, Alpine.js, Chart.js, Vue and three.js (2.6 MB) parse into
 the same trees - `tests/acorn/compare.sh` checks any script.
+
+## The compiler
+
+A partial evaluator: what is known when the page is converted - constant
+data, elements, unrolled `forEach`, `Math.round(Math.PI * 100)` - is
+computed; what changes while the view runs is the view's code. The
+scripts' loading is the init handler, functions are handlers (one for each
+set of static arguments they are called with), `setTimeout` /
+`setInterval` the view's timers, numbers that may hold fractions fixed
+point (1/1000). The DOM is a host's (dmvs_html): the compiler hands it
+what scripts do with its elements, and it emits the actions that do it.
+What is not compiled is reported, with its line and column - the rest is.
+See [docs/compiler.md](docs/compiler.md).
 
 ## Usage
 
@@ -95,7 +109,10 @@ cd build
 ctest --output-on-failure
 ```
 
-The tests check the trees of scripts, errors and where they are, and two
+The tests compile scripts into documents and run them - a small
+interpreter of the documents' actions, a host of a few elements - to
+check what the elements show (clicks, intervals, timeouts, numbers read
+from texts). They check the trees of scripts, errors and where they are, and two
 real pages' scripts (`tests/fixtures`) against the trees acorn makes of
 them (`*.tree`, written by `tests/acorn/tree.js`). To compare any script
 with acorn (needs node and `npm install acorn`):
