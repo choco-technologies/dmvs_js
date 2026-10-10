@@ -200,6 +200,10 @@ struct compiler
     deferred_t*     deferred;
     bool            flushing;           /* In the host's flush() */
     uint32_t        html;               /* Compiling what is set to an innerHTML: its strings' character references decoded */
+    bool            evaluate;           /* An evaluator (dmvs_js_evaluator_new()): run as JavaScript runs, nothing emitted */
+    bool            returning;          /* Evaluating: a return reached - the rest of the function is not run */
+    bool            own_doc;            /* The document is the compiler's (an evaluator's scratch) */
+    uint32_t        timers;             /* Evaluating: setTimeout / setInterval given out */
     program_t*      programs;           /* Every piece of code seen (the pre-scan looks at all) - the compiler's */
 };
 

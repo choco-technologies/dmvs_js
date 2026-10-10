@@ -631,6 +631,8 @@ static value_t array_method(compiler_t* c, const object_t* a, const char* m, con
 
 static value_t start_timer(compiler_t* c, bool repeat, const value_t* args, uint32_t count)
 {
+    if (c->evaluate)
+        return v_number((double)++c->timers);       /* Evaluating the loading: what it starts does not run */
     double ms = arg_number(args, count, 1, 0.0);
     if (count == 0 || (count > 1 && !is_static(&args[1])))
     {
@@ -683,6 +685,8 @@ static value_t start_timer(compiler_t* c, bool repeat, const value_t* args, uint
 
 static value_t clear_timer(compiler_t* c, const value_t* args, uint32_t count)
 {
+    if (c->evaluate)
+        return v_undefined();
     if (count == 0)
         return v_undefined();
     double id;

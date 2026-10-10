@@ -786,3 +786,91 @@ DMOD_TEST_STEP(dmvs_js_compiles_listeners_when_the_scripts_have_loaded)
     DMOD_TEST_EXPECT_TRUE(shows_is(p, "out", "shown"));
     unload(p, c);
 }
+
+/* ---- An evaluator: the loading run as JavaScript runs it ---- */
+
+static char g_built[512];
+static uint32_t g_created;
+
+static int build_call(void* ctx, dmvs_js_compiler_t c, const dmvs_js_value_t* self, const char* method,
+                      const dmvs_js_value_t* args, uint32_t count, dmvs_js_value_t* result)
+{
+    (void)c;
+    memset(result, 0, sizeof(*result));
+    if (self->kind == DMVS_JS_V_OBJECT && self->object == DOCUMENT && strcmp(method, "createElement") == 0)
+    {
+        result->kind = DMVS_JS_V_OBJECT;
+        result->object = 200u + ++g_created;
+        return 0;
+    }
+    if (strcmp(method, "appendChild") == 0 && count == 1)
+    {
+        size_t n = strlen(g_built);
+        Dmod_SnPrintf(g_built + n, sizeof(g_built) - n, "[%u]", (unsigned)(args[0].object - 200u));
+        return 0;
+    }
+    return host_call(ctx, c, self, method, args, count, result);
+}
+
+static int build_set(void* ctx, dmvs_js_compiler_t c, const dmvs_js_value_t* object, const char* name, const dmvs_js_value_t* value)
+{
+    (void)ctx;
+    (void)c;
+    if (object->kind == DMVS_JS_V_OBJECT && object->object > 200u && value->kind == DMVS_JS_V_STRING)
+    {
+        size_t n = strlen(g_built);
+        Dmod_SnPrintf(g_built + n, sizeof(g_built) - n, "%u.%s=%s ", (unsigned)(object->object - 200u), name, value->text);
+        return 0;
+    }
+    return -ENOTSUP;
+}
+
+DMOD_TEST_STEP(dmvs_js_evaluates_what_the_scripts_do_when_they_load)
+{
+    page_t* p = page();
+    memset(p, 0, sizeof(*p));
+    g_built[0] = '\0';
+    g_created = 0;
+    dmvs_js_host_t host;
+    memset(&host, 0, sizeof(host));
+    host.ctx = p;
+    host.global = host_global;
+    host.call = build_call;
+    host.set = build_set;
+    host.report = host_report;
+    dmvs_js_compiler_t c = dmvs_js_evaluator_new(&host);
+    DMOD_TEST_EXPECT_TRUE(c != NULL);
+    const char* script =
+        "const songs = [{ t: 'A', s: 70 }, { t: 'B', s: 125 }, { t: 'C', s: 3 }];\n"
+        "let current = 1, made = 0;\n"
+        "const list = document.createElement('ul');\n"
+        "function time(sec) { if (sec < 60) return '0:' + String(sec).padStart(2, '0'); return Math.floor(sec / 60) + ':' + (sec % 60); }\n"
+        "function render() {\n"
+        "  songs.forEach((song, i) => {\n"
+        "    const div = document.createElement('div');\n"
+        "    div.className = `row ${i === current ? 'on' : 'off'}`;\n"
+        "    div.innerHTML = `${song.t} ${time(song.s)}`;\n"
+        "    list.appendChild(div);\n"
+        "    made++;\n"
+        "  });\n"
+        "}\n"
+        "render();\n"
+        "let n = 0;\n"
+        "while (n < made) n += 2;\n"
+        "if (n === 4) { const d = document.createElement('p'); d.textContent = 'four'; }\n"
+        "setInterval(() => render(), 1000);\n";
+    dmvs_js_error_t e;
+    dmvs_js_ast_t ast = dmvs_js_parse(script, strlen(script), &e);
+    DMOD_TEST_EXPECT_TRUE(ast != NULL);
+    DMOD_TEST_EXPECT_EQ(dmvs_js_compile(c, ast), 0);
+    dmvs_js_compiler_free(c);
+    /* Every variable known as it changes, functions run at every call, the interval not */
+    const char* want = "2.className=row off 2.innerHTML=A 1:10 [2]3.className=row on 3.innerHTML=B 2:5 [3]"
+                       "4.className=row off 4.innerHTML=C 0:03 [4]5.textContent=four ";
+    bool same = strcmp(g_built, want) == 0;
+    if (!same)
+        Dmod_Printf("    built %s\n    want  %s\n", g_built, want);
+    DMOD_TEST_EXPECT_TRUE(same);
+    DMOD_TEST_EXPECT_EQ(g_created, 5u);
+    DMOD_TEST_EXPECT_EQ(p->reports, 0u);
+}

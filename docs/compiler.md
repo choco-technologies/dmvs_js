@@ -76,6 +76,21 @@ aren't reported again, they aren't set (the element keeps its text),
 and an `if` on one takes neither branch. Examples are classes, `new`,
 `try`, labels, spreads, and comparisons of runtime texts.
 
+## An evaluator
+
+`dmvs_js_evaluator_new(&host)` runs the scripts' loading the way a
+browser runs it, at conversion:
+- every variable is known and assignments are followed;
+- functions run on every call, and `return` ends them;
+- loops really iterate;
+- listeners and timers don't run;
+- nothing is emitted.
+
+The host learns what the page is once its scripts have loaded. For
+example, dmvs_html records the elements the scripts create
+(`createElement`, `innerHTML`, `appendChild`) and lays the page out with
+them.
+
 ## The language
 
 | | |

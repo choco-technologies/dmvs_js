@@ -313,6 +313,17 @@ typedef struct
 dmod_dmvs_js_api(1.0, dmvs_js_compiler_t, _compiler_new, ( dmvsi_doc_t doc, const dmvs_js_host_t* host ));
 
 /**
+ * @brief An evaluator: the scripts' loading run as JavaScript runs it, at
+ *        conversion - every variable known (assignments followed),
+ *        functions run at every call, loops as they go; listeners and
+ *        timers do not run, nothing is emitted (into a document of its own).
+ *        The host learns what the page is when its scripts have loaded
+ *        (the elements they make). Compile its scripts with
+ *        dmvs_js_compile(), free it with dmvs_js_compiler_free().
+ */
+dmod_dmvs_js_api(1.0, dmvs_js_compiler_t, _evaluator_new, ( const dmvs_js_host_t* host ));
+
+/**
  * @brief Show the compiler code before it is compiled: what it assigns is
  *        a variable, not a constant, for the code compiled before it too -
  *        the onclick="..." code of a page, scanned before its scripts.

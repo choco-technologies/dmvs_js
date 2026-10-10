@@ -25,6 +25,7 @@
 static value_t expression(compiler_t* c, scope_t* s, const node_t* n);
 static int statement(compiler_t* c, scope_t* s, const node_t* n);
 static int statements(compiler_t* c, scope_t* s, const node_t* first);
+static int declarations(compiler_t* c, scope_t* s, const node_t* n);
 
 /* What a loop being compiled is: a runtime LOOP, or unrolled (break / continue are flags) */
 
@@ -345,6 +346,8 @@ static void pop_loop(compiler_t* c)
 /* Whether the code ahead is skipped: an unrolled loop's break / continue reached */
 static bool skipping(compiler_t* c)
 {
+    if (c->returning)
+        return true;
     loop_t* l = current_loop(c);
     return l != NULL && !l->runtime && (l->broken || l->continued);
 }
@@ -889,7 +892,7 @@ static value_t assign(compiler_t* c, scope_t* s, const node_t* target, uint8_t o
             report(c, "an assignment to a constant - not converted");
             return v;
         }
-        if (c->code == &c->init && c->code->blocks == 0 && is_static(&v))
+        if ((c->evaluate || (c->code == &c->init && c->code->blocks == 0)) && is_static(&v))
         {
             b->value = v;                           /* Still known: while the script loads, outside conditions */
             return v;
@@ -931,7 +934,7 @@ static value_t assign(compiler_t* c, scope_t* s, const node_t* target, uint8_t o
             return v;
         }
         object_t* o = (object_t*)as_object(&object, O_OBJECT);
-        if (o != NULL && c->code == &c->init && c->code->blocks == 0 && is_static(&v))
+        if (o != NULL && (c->evaluate || (c->code == &c->init && c->code->blocks == 0)) && is_static(&v))
         {
             for (uint32_t i = 0; i < o->count; i++)
             {
@@ -1298,7 +1301,7 @@ static void function_body(compiler_t* c, scope_t* s, spec_t* sp)
 static spec_t* specialize(compiler_t* c, const object_t* f, const value_t* self, const value_t* args, uint32_t count,
                           bool fresh, dmvsi_handler_t preset)
 {
-    for (spec_t* sp = c->specs; sp != NULL; sp = sp->next)
+    for (spec_t* sp = c->specs; sp != NULL && !c->evaluate; sp = sp->next)    /* (evaluating: run at every call) */
     {
         if (sp->fn == f && same_args(sp, self, args, count) && !(fresh && sp->compiling))
             return sp;
@@ -1383,6 +1386,7 @@ static spec_t* specialize(compiler_t* c, const object_t* f, const value_t* self,
     uint32_t loop_depth = c->loop_depth;
     c->loop_depth = 0;                               /* A break in it is not of the loops around the call */
     function_body(c, s, sp);
+    c->returning = false;
     flush_host(c);
     c->loop_depth = loop_depth;
 
@@ -1510,13 +1514,13 @@ value_t call_value(compiler_t* c, const value_t* callee, const value_t* self, co
         if (sp->fn == f && sp->compiling && same_args(sp, &me, args, count))
             depth++;
     }
-    if (depth > MAX_RECURSION)
+    if (depth > (c->evaluate ? 64u : MAX_RECURSION))
     {
         report(c, "a recursive call deeper than the compiler follows - not converted");
         return v_unknown();
     }
     const node_t* at = c->at;
-    spec_t* sp = specialize(c, f, &me, args, count, depth > 0, 0);
+    spec_t* sp = specialize(c, f, &me, args, count, depth > 0 || c->evaluate, 0);
     c->at = at;
     if (sp == NULL)
         return v_undefined();
@@ -1626,6 +1630,15 @@ static void return_value(compiler_t* c, scope_t* s, const node_t* n)
     }
     value_t v = expression(c, s, n->a);
     c->at = n;
+    if (c->evaluate)
+    {
+        /* As it runs: this is what it returns, the rest is not run */
+        sp->returns = n->a != NULL;
+        sp->ret = v;
+        sp->ret_static_only = true;
+        c->returning = true;
+        return;
+    }
     if (n->a != NULL)
     {
         if (!sp->returns)
@@ -1684,7 +1697,7 @@ static int declarations(compiler_t* c, scope_t* s, const node_t* n)
             continue;
         }
         const char* name = d->a->text;
-        bool constant = n->op == DMVS_JS_VAR_CONST || !assigned_name(c, name);
+        bool constant = n->op == DMVS_JS_VAR_CONST || !assigned_name(c, name) || c->evaluate;
         if (constant && starts_timer(c, s, d->b))
         {
             /* const t = setInterval(() => { ... clearInterval(t) }): its number known before the function is compiled */
@@ -1925,12 +1938,49 @@ static int loop_body(compiler_t* c, scope_t* s, const node_t* body, loop_t* l)
     return 0;
 }
 
+/* Evaluating: a loop as it runs - its test each time (known: everything is), its body, its update */
+static int evaluate_loop(compiler_t* c, scope_t* s, const node_t* init, const node_t* test, const node_t* update,
+                         const node_t* body, bool test_first)
+{
+    if (init != NULL)
+    {
+        if (init->kind == DMVS_JS_VAR)
+            declarations(c, s, init);
+        else
+            (void)expression(c, s, init);
+    }
+    loop_t l;
+    memset(&l, 0, sizeof(l));
+    for (uint32_t k = 0; k < 100000u && !l.broken && !c->returning && !c->failed; k++)
+    {
+        if (test != NULL && (test_first || k > 0))
+        {
+            test_t t = condition(c, s, test);
+            if (t.kind != 0 || t.unknown)
+            {
+                report(c, "a loop on what is not known - not run");
+                break;
+            }
+            if (!t.value)
+                break;
+        }
+        l.continued = false;
+        loop_body(c, s, body, &l);
+        if (update != NULL && !l.broken && !c->returning)
+            (void)expression(c, s, update);
+        release_temps(c);
+    }
+    return 0;
+}
+
 static int for_statement(compiler_t* c, scope_t* s, const node_t* n)
 {
     scope_t* inner = new_scope(c, s, s->spec);
     const char* name = NULL;
     double from = 0, step = 0;
     uint32_t steps = 0;
+    if (c->evaluate && !(unrollable(c, inner, n, &name, &from, &steps, &step) && !sets_name(n->d, name, 0)))
+        return evaluate_loop(c, inner, n->a, n->b, n->c, n->d, true);
     if (!breaks_inside(n->d, true, 0) && unrollable(c, inner, n, &name, &from, &steps, &step) && !sets_name(n->d, name, 0))
     {
         loop_t l;
@@ -1988,6 +2038,8 @@ static int for_statement(compiler_t* c, scope_t* s, const node_t* n)
 
 static int while_statement(compiler_t* c, scope_t* s, const node_t* n, bool test_first)
 {
+    if (c->evaluate)
+        return evaluate_loop(c, s, NULL, test_first ? n->a : n->b, NULL, test_first ? n->b : n->a, test_first);
     loop_t l;
     memset(&l, 0, sizeof(l));
     l.runtime = true;
@@ -2275,6 +2327,22 @@ dmod_dmvs_js_api_declaration(1.0, int, _scan, ( dmvs_js_compiler_t compiler, dmv
     return (take(c, code) != NULL) ? 0 : -ENOMEM;
 }
 
+dmod_dmvs_js_api_declaration(1.0, dmvs_js_compiler_t, _evaluator_new, ( const dmvs_js_host_t* host ))
+{
+    dmvsi_doc_t doc = dmvsi_new();                  /* What it emits (nothing that matters): its own */
+    if (doc == NULL)
+        return NULL;
+    compiler_t* c = (compiler_t*)dmvs_js_compiler_new(doc, host);
+    if (c == NULL)
+    {
+        dmvsi_free(doc);
+        return NULL;
+    }
+    c->own_doc = true;
+    c->evaluate = true;
+    return (dmvs_js_compiler_t)c;
+}
+
 dmod_dmvs_js_api_declaration(1.0, int, _compile, ( dmvs_js_compiler_t compiler, dmvs_js_ast_t script ))
 {
     compiler_t* c = (compiler_t*)compiler;
@@ -2357,6 +2425,8 @@ dmod_dmvs_js_api_declaration(1.0, void, _compiler_free, ( dmvs_js_compiler_t com
         return;
     for (const program_t* k = c->programs; k != NULL; k = k->next)
         dmvs_js_free(k->ast);
+    if (c->own_doc)
+        dmvsi_free(c->doc);
     arena_release(&c->arena);
     Dmod_Free(c);
 }
