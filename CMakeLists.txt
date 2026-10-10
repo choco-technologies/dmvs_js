@@ -27,7 +27,7 @@ set(DMOD_BUILD_TEMPLATES OFF CACHE BOOL "Build templates")
 FetchContent_MakeAvailable(dmod)
 
 project(dmvs_js VERSION ${DMOD_MODULE_VERSION}
-    DESCRIPTION "dmvs_js DMOD library module"
+    DESCRIPTION "JavaScript for dmview views"
     LANGUAGES C CXX)
 
 set(DMOD_DIR ${dmod_SOURCE_DIR} CACHE PATH "DMOD source directory")
@@ -60,8 +60,9 @@ set(DMOD_DIF_IMPLS          )
 #   (for example, to link libraries)
 #
 dmod_add_library(${DMOD_MODULE_NAME} ${DMOD_MODULE_VERSION}
-    # List of source files - can include C and C++ files
     src/dmvs_js.c
+    src/lexer.c
+    src/parser.c
 )
 
 target_include_directories(${DMOD_MODULE_NAME} PRIVATE
@@ -77,4 +78,5 @@ target_include_directories(${DMOD_MODULE_NAME}_if INTERFACE
 #       other_module@1.0
 #   )
 enable_testing()
+add_subdirectory(apps/jsdump)
 add_subdirectory(tests)
