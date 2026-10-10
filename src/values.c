@@ -37,6 +37,26 @@ bool is_unknown(const value_t* v)
     return v->kind == DMVS_JS_V_UNKNOWN;
 }
 
+const object_t* choice_of(const value_t* v)
+{
+    const object_t* o = (v->kind == DMVS_JS_V_RUNTIME) ? v->internal : NULL;
+    return (o != NULL && o->kind == O_CHOICE) ? o : NULL;
+}
+
+/* What a runtime value is one of: picks[index] (index a variable of 0 ...) */
+void set_choice(compiler_t* c, value_t* v, const value_t* picks, uint32_t count, dmvsi_var_t index)
+{
+    object_t* o = new_object(c, O_CHOICE);
+    value_t* values = arena_alloc(&c->arena, (count + 1U) * sizeof(value_t));
+    if (o == NULL || values == NULL || index == 0)
+        return;
+    memcpy(values, picks, count * sizeof(value_t));
+    o->values = values;
+    o->count = count;
+    o->index = index;
+    v->internal = o;
+}
+
 value_t v_number(double n)
 {
     value_t v = v_undefined();
@@ -858,8 +878,35 @@ value_t concat(compiler_t* c, const value_t* parts, uint32_t count)
         return v;
     }
 
+    /* One part a choice, the others static: a choice of the texts it makes */
+    const object_t* choice = NULL;
+    uint32_t choices = 0;
+    for (uint32_t i = 0; i < count; i++)
+    {
+        if (!is_static(&parts[i]))
+        {
+            choices++;
+            choice = choice_of(&parts[i]);
+        }
+    }
+    value_t* made = NULL;
+    if (choices == 1 && choice != NULL && (made = arena_alloc(&c->arena, (choice->count + 1U) * sizeof(value_t))) != NULL)
+    {
+        value_t* each = arena_alloc(&c->arena, (count + 1U) * sizeof(value_t));
+        for (uint32_t k = 0; k < choice->count && each != NULL; k++)
+        {
+            for (uint32_t i = 0; i < count; i++)
+                each[i] = is_static(&parts[i]) ? parts[i] : choice->values[k];
+            made[k] = concat(c, each, count);
+        }
+        if (each == NULL)
+            made = NULL;
+    }
+
     dmvsi_var_t t = temp(c, DMVS_JS_T_TEXT);
     value_t out = v_runtime(DMVS_JS_T_TEXT, 0, t);
+    if (made != NULL)
+        set_choice(c, &out, made, choice->count, choice->index);
     bool first = true;
     for (uint32_t i = 0; i < count; i++)
     {

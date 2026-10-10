@@ -35,6 +35,7 @@ typedef struct spec spec_t;
 #define O_FUNCTION      3u
 #define O_BUILTIN       4u              /* A function or object of the language (Math.floor, setTimeout, ...) */
 #define O_SELECT        5u              /* An element of a static array picked by a runtime index */
+#define O_CHOICE        6u              /* A runtime value that is one of static ones (values[index]): its `internal` */
 
 typedef struct object object_t;
 struct object
@@ -211,6 +212,8 @@ struct compiler
 void            report(compiler_t* c, const char* message);
 value_t         v_undefined(void);
 value_t         v_unknown(void);                                /* Not converted (reported): nor what is made of it */
+const object_t* choice_of(const value_t* v);                    /* A runtime value's static choices, NULL: none */
+void            set_choice(compiler_t* c, value_t* v, const value_t* picks, uint32_t count, dmvsi_var_t index);
 bool            is_unknown(const value_t* v);
 value_t         v_number(double n);
 value_t         v_bool(bool b);

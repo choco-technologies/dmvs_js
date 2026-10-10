@@ -663,6 +663,7 @@ static value_t select(compiler_t* c, const object_t* sel, const char* property)
         assign_to(c, &r, &picks[i]);
         emit_end(c);
     }
+    set_choice(c, &r, picks, n, sel->index);        /* What it is one of: a host may take them all (images) */
     return r;
 }
 
@@ -1198,8 +1199,10 @@ static value_t expression(compiler_t* c, scope_t* s, const node_t* n)
                 return v_unknown();
             if (t.kind == 0)
                 return expression(c, s, t.value ? n->b : n->c);
+            dmvsi_var_t which = temp(c, DMVS_JS_T_BOOL);     /* 1: the first, 0: the second (a choice of them) */
             emit_op(c, t.kind, t.var, t.operand, t.imm, NULL);
             c->code->blocks++;
+            emit_op(c, DMVSI_ACT_SET, which, 0, 1, NULL);
             value_t a = expression(c, s, n->b);
             value_t r;
             if (is_text(&a))
@@ -1209,10 +1212,16 @@ static value_t expression(compiler_t* c, scope_t* s, const node_t* n)
                               DMVS_JS_T_BOOL : DMVS_JS_T_NUMBER, FIX, temp(c, DMVS_JS_T_NUMBER));
             assign_to(c, &r, &a);
             emit_op(c, DMVSI_ACT_ELSE, 0, 0, 0, NULL);
+            emit_op(c, DMVSI_ACT_SET, which, 0, 0, NULL);
             value_t b = expression(c, s, n->c);
             assign_to(c, &r, &b);
             c->code->blocks--;
             emit_end(c);
+            if (is_static(&a) && is_static(&b) && a.kind != DMVS_JS_V_INTERNAL && b.kind != DMVS_JS_V_INTERNAL)
+            {
+                value_t picks[2] = { b, a };
+                set_choice(c, &r, picks, 2, which);
+            }
             return r;
         }
         case DMVS_JS_ASSIGN:
@@ -2542,4 +2551,16 @@ dmod_dmvs_js_api_declaration(1.0, int, _array, ( dmvs_js_compiler_t compiler, co
     a->count = count;
     *array = v_internal(a);
     return 0;
+}
+
+dmod_dmvs_js_api_declaration(1.0, uint32_t, _choices, ( dmvs_js_compiler_t compiler, const dmvs_js_value_t* value, const dmvs_js_value_t** picks, dmvsi_var_t* index ))
+{
+    const object_t* o = (compiler != NULL && value != NULL) ? choice_of(value) : NULL;
+    if (o == NULL)
+        return 0;
+    if (picks != NULL)
+        *picks = o->values;
+    if (index != NULL)
+        *index = o->index;
+    return o->count;
 }

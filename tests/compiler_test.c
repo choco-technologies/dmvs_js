@@ -154,6 +154,25 @@ static void make_held(page_t* p, dmvs_js_compiler_t c)
     g_held_count = 0;
 }
 
+static char g_choices[256];                 /* What texts set were one of: "a|b|c@var " */
+
+static void record_choices(dmvs_js_compiler_t c, const dmvs_js_value_t* value)
+{
+    const dmvs_js_value_t* picks = NULL;
+    dmvsi_var_t index = 0;
+    uint32_t n = dmvs_js_choices(c, value, &picks, &index);
+    for (uint32_t i = 0; i < n; i++)
+    {
+        size_t k = strlen(g_choices);
+        Dmod_SnPrintf(g_choices + k, sizeof(g_choices) - k, "%s%s", (i > 0) ? "|" : "", (picks[i].kind == DMVS_JS_V_STRING) ? picks[i].text : "?");
+    }
+    if (n > 0)
+    {
+        size_t k = strlen(g_choices);
+        Dmod_SnPrintf(g_choices + k, sizeof(g_choices) - k, "%s ", (index != 0) ? "@" : "!");
+    }
+}
+
 static int host_set(void* ctx, dmvs_js_compiler_t c, const dmvs_js_value_t* object, const char* name, const dmvs_js_value_t* value)
 {
     page_t* p = ctx;
@@ -162,6 +181,7 @@ static int host_set(void* ctx, dmvs_js_compiler_t c, const dmvs_js_value_t* obje
     element_t* e = element(p, object->object);
     if (e == NULL || (strcmp(name, "innerText") != 0 && strcmp(name, "textContent") != 0 && strcmp(name, "innerHTML") != 0))
         return -ENOTSUP;
+    record_choices(c, value);
     dmvsi_action_t a;
     memset(&a, 0, sizeof(a));
     a.kind = DMVSI_ACT_SET;
@@ -873,4 +893,30 @@ DMOD_TEST_STEP(dmvs_js_evaluates_what_the_scripts_do_when_they_load)
     DMOD_TEST_EXPECT_TRUE(same);
     DMOD_TEST_EXPECT_EQ(g_created, 5u);
     DMOD_TEST_EXPECT_EQ(p->reports, 0u);
+}
+
+DMOD_TEST_STEP(dmvs_js_tells_what_a_value_is_one_of)
+{
+    const char* ids = "cover=|row=|next=";
+    page_t* p = page();
+    dmvs_js_compiler_t c = compiler_of(p, ids);
+    g_choices[0] = '\0';
+    DMOD_TEST_EXPECT_TRUE(load(p, c,
+        "const songs = [{ cover: 'a.jpg' }, { cover: 'b.jpg' }, { cover: 'c.jpg' }];\n"
+        "let current = 0;\n"
+        "function show() {\n"
+        "  const song = songs[current];\n"
+        "  document.getElementById('cover').innerText = song.cover;\n"
+        "  document.getElementById('row').innerText = `row ${current === 1 ? 'on' : 'off'}`;\n"
+        "}\n"
+        "document.getElementById('next').addEventListener('click', () => { current = (current + 1) % 3; show(); });\n"));
+    click(p, "next");
+    DMOD_TEST_EXPECT_TRUE(shows_is(p, "cover", "b.jpg") && shows_is(p, "row", "row on"));
+    /* The cover one of the songs', the row's text one of two - each with the variable telling which */
+    const char* want = "a.jpg|b.jpg|c.jpg@ row off|row on@ ";
+    bool same = strcmp(g_choices, want) == 0;
+    if (!same)
+        Dmod_Printf("    choices %s\n    want    %s\n", g_choices, want);
+    DMOD_TEST_EXPECT_TRUE(same);
+    unload(p, c);
 }

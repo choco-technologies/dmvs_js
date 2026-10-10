@@ -389,6 +389,17 @@ dmod_dmvs_js_api(1.0, dmvsi_handler_t, _function_handler, ( dmvs_js_compiler_t c
  */
 dmod_dmvs_js_api(1.0, uint32_t, _object_domain, ( dmvs_js_compiler_t c, dmvsi_var_t var, uint32_t* objects, uint32_t max ));
 
+/**
+ * @brief What a runtime value is one of: static `picks`, `*index` the
+ *        variable telling which (0 ...) - playlist[i].cover (picked by a
+ *        runtime index), a ? 'x' : 'y' (index 1: the first), a text made of
+ *        one and static parts. A host can take them all (each an image, a
+ *        look) and show the one the index says. Valid while the statement
+ *        that made the value is compiled (the index may be a temporary).
+ * @return How many (0: it is none of known ones)
+ */
+dmod_dmvs_js_api(1.0, uint32_t, _choices, ( dmvs_js_compiler_t c, const dmvs_js_value_t* value, const dmvs_js_value_t** picks, dmvsi_var_t* index ));
+
 /** @brief An array of values (the host's elements of a selector, ...). @return 0, -ENOMEM */
 dmod_dmvs_js_api(1.0, int, _array, ( dmvs_js_compiler_t c, const dmvs_js_value_t* values, uint32_t count, dmvs_js_value_t* array ));
 
