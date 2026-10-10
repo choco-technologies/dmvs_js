@@ -24,7 +24,7 @@ DMOD_MODULE_VERSION=0.1
 DMOD_AUTHOR_NAME=Patryk Kubiak
 
 # The list of C sources
-DMOD_CSOURCES=src/dmvs_js.c src/lexer.c src/parser.c src/source.c
+DMOD_CSOURCES=src/dmvs_js.c src/lexer.c src/parser.c src/source.c src/compile.c src/values.c src/builtins.c
 
 # The list of C++ sources
 DMOD_CXXSOURCES=
