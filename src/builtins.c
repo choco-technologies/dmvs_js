@@ -28,7 +28,7 @@ bool builtin_global(compiler_t* c, const char* name, value_t* out)
         { "Math", B_MATH }, { "parseFloat", B_PARSE_FLOAT }, { "parseInt", B_PARSE_INT },
         { "Number", B_NUMBER }, { "String", B_STRING }, { "setTimeout", B_SET_TIMEOUT },
         { "setInterval", B_SET_INTERVAL }, { "clearTimeout", B_CLEAR_TIMER }, { "clearInterval", B_CLEAR_TIMER },
-        { "console", B_CONSOLE },
+        { "console", B_CONSOLE }, { "dmod", B_DMOD },
     };
     for (size_t i = 0; i < sizeof(globals) / sizeof(globals[0]); i++)
     {
@@ -80,6 +80,22 @@ bool builtin_member(compiler_t* c, const value_t* object, const char* name, valu
             if (name_is(math[i].name, name))
             {
                 *out = builtin(c, math[i].id, NULL, NULL);
+                return true;
+            }
+        }
+        return false;
+    }
+    if (b != NULL && b->builtin == B_DMOD)
+    {
+        static const struct { char name[12]; uint32_t id; } channel[] = {
+            { "prop", B_DMOD_PROP }, { "get", B_DMOD_GET }, { "set", B_DMOD_SET }, { "emit", B_DMOD_EMIT },
+            { "onchange", B_DMOD_ONCHANGE },
+        };
+        for (size_t i = 0; i < sizeof(channel) / sizeof(channel[0]); i++)
+        {
+            if (name_is(channel[i].name, name))
+            {
+                *out = builtin(c, channel[i].id, NULL, NULL);
                 return true;
             }
         }
@@ -798,6 +814,172 @@ int finish_timers(compiler_t* c)
     return 0;
 }
 
+/* ---- dmod: the channel of the view and the application that shows it ----
+ *
+ * dmod.prop(name, initial) makes a property of the view - a variable the
+ * application reads and sets by `name` (dmview's .prop): a text of a string
+ * initial, else an integer - and is its initial value, as JavaScript has
+ * it (a const of it keeps that). dmod.get(name) is its value now,
+ * dmod.set(name, value) sets it from the view, dmod.onchange(name, fn) runs
+ * fn when the application changed it, dmod.emit(name, value) sends the
+ * application an event. Names are static texts. A page in a browser gets
+ * `dmod` from a script of its own that the conversion does not run.
+ */
+
+/* The name argument: a static text, else reported (NULL) */
+static const char* channel_name(compiler_t* c, const value_t* args, uint32_t count, const char* what)
+{
+    if (count == 0 || args[0].kind != DMVS_JS_V_STRING || args[0].length == 0)
+    {
+        report(c, what);
+        return NULL;
+    }
+    return arena_strndup(&c->arena, args[0].text, args[0].length);
+}
+
+static int find_prop(const compiler_t* c, const char* name)
+{
+    for (uint32_t i = 0; i < c->prop_count; i++)
+    {
+        if (strcmp(c->props[i].name, name) == 0)
+            return (int)i;
+    }
+    return -1;
+}
+
+static int prop_of(compiler_t* c, const value_t* args, uint32_t count, const char* fn);
+
+static value_t dmod_prop(compiler_t* c, const value_t* args, uint32_t count)
+{
+    const char* name = channel_name(c, args, count, "dmod.prop() of a name known only when the view runs - not converted");
+    if (name == NULL)
+        return v_unknown();
+    int i = find_prop(c, name);
+    if (i >= 0)
+    {
+        return c->props[i].initial;                                 /* The same property again */
+    }
+    value_t initial = (count > 1) ? args[1] : v_number(0.0);
+    double n = 0;
+    bool text = initial.kind == DMVS_JS_V_STRING;
+    if (!text && !static_number(&initial, &n) && initial.kind != DMVS_JS_V_UNDEFINED)
+    {
+        report(c, "dmod.prop() of an initial value known only when the view runs - not converted");
+        return v_unknown();
+    }
+    if (c->prop_count >= MAX_PROPS)
+    {
+        report(c, "too many properties (dmod.prop) - not converted");
+        return v_unknown();
+    }
+    i = (int)c->prop_count++;
+    c->props[i].name = name;
+    c->props[i].type = text ? DMVS_JS_T_TEXT : DMVS_JS_T_NUMBER;
+    c->props[i].initial = initial;
+    if (c->evaluate)
+        return initial;
+
+    /* A variable of the document's own (not of the function calling it), named after the property */
+    char vname[48];
+    size_t k = 0;
+    for (const char* p = name; *p != '\0' && k + 1U < sizeof(vname) - 2U; p++)
+        vname[k++] = ((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || (*p >= '0' && *p <= '9')) ? *p : '_';
+    vname[k] = '\0';
+    code_t* code = c->code;
+    c->code = NULL;
+    char init_text[TEXT_SIZE + 1U];
+    size_t len = text ? ((initial.length > TEXT_SIZE) ? TEXT_SIZE : initial.length) : 0;
+    if (text)
+    {
+        memcpy(init_text, initial.text, len);
+        init_text[len] = '\0';
+    }
+    c->props[i].var = new_var(c, vname, c->props[i].type, text ? 0 : (int32_t)n, text ? init_text : NULL);
+    c->code = code;
+    if (c->props[i].var == 0 || dmvsi_set_prop(c->doc, c->props[i].var, name) != 0)
+    {
+        report(c, "a property's name that is not one (letters, digits, '_', '.', '-'; once) - not converted");
+        c->prop_count--;
+        return v_unknown();
+    }
+    return initial;
+}
+
+static value_t dmod_get(compiler_t* c, const value_t* args, uint32_t count)
+{
+    int i = prop_of(c, args, count, "dmod.get()");
+    if (i < 0)
+        return v_unknown();
+    if (c->evaluate)
+        return c->props[i].initial;
+    return v_runtime(c->props[i].type, 0, c->props[i].var);
+}
+
+static int prop_of(compiler_t* c, const value_t* args, uint32_t count, const char* fn)
+{
+    char what[80];
+    Dmod_SnPrintf(what, sizeof(what), "%s of a name known only when the view runs - not converted", fn);
+    const char* name = channel_name(c, args, count, what);
+    if (name == NULL)
+        return -1;
+    int i = find_prop(c, name);
+    if (i < 0)
+    {
+        Dmod_SnPrintf(what, sizeof(what), "%s of a property not made by dmod.prop() before - not converted", fn);
+        report(c, what);
+    }
+    return i;
+}
+
+static value_t dmod_set(compiler_t* c, const value_t* args, uint32_t count)
+{
+    if (c->evaluate)
+        return v_undefined();
+    int i = prop_of(c, args, count, "dmod.set()");
+    if (i < 0)
+        return v_undefined();
+    value_t target = v_runtime(c->props[i].type, 0, c->props[i].var);
+    value_t value = (count > 1) ? args[1] : v_undefined();
+    (void)assign_to(c, &target, &value);
+    return v_undefined();
+}
+
+static value_t dmod_emit(compiler_t* c, const value_t* args, uint32_t count)
+{
+    if (c->evaluate)
+        return v_undefined();
+    const char* name = channel_name(c, args, count, "dmod.emit() of a name known only when the view runs - not converted");
+    if (name == NULL)
+        return v_undefined();
+    dmvsi_var_t var = 0;
+    int32_t imm = 0;
+    if (count > 1 && args[1].kind != DMVS_JS_V_UNDEFINED && !number_operand(c, &args[1], 0, &var, &imm))
+    {
+        report(c, "dmod.emit() of a value that is not a number - not converted");
+        return v_undefined();
+    }
+    (void)emit_op(c, DMVSI_ACT_EMIT, 0, var, imm, name);
+    return v_undefined();
+}
+
+static value_t dmod_onchange(compiler_t* c, const value_t* args, uint32_t count)
+{
+    if (c->evaluate)
+        return v_undefined();
+    int i = prop_of(c, args, count, "dmod.onchange()");
+    if (i < 0 || count < 2)
+        return v_undefined();
+    code_t* code = c->code;
+    const node_t* at = c->at;
+    value_t undefined = v_undefined();
+    dmvsi_handler_t handler = function_handler(c, &args[1], &undefined);
+    c->code = code;
+    c->at = at;
+    if (handler == 0 || dmvsi_on_change(c->doc, c->props[i].var, handler) != 0)
+        report(c, "dmod.onchange() of what is not a function - not converted");
+    return v_undefined();
+}
+
 /* ---- Calls ---- */
 
 value_t builtin_call(compiler_t* c, const object_t* fn, const value_t* args, uint32_t count)
@@ -883,6 +1065,16 @@ value_t builtin_call(compiler_t* c, const object_t* fn, const value_t* args, uin
             return start_timer(c, fn->builtin == B_SET_INTERVAL, args, count);
         case B_CLEAR_TIMER:
             return clear_timer(c, args, count);
+        case B_DMOD_PROP:
+            return dmod_prop(c, args, count);
+        case B_DMOD_GET:
+            return dmod_get(c, args, count);
+        case B_DMOD_SET:
+            return dmod_set(c, args, count);
+        case B_DMOD_EMIT:
+            return dmod_emit(c, args, count);
+        case B_DMOD_ONCHANGE:
+            return dmod_onchange(c, args, count);
         case B_NOOP:
             return v_undefined();
         default:

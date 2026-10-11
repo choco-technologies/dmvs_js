@@ -35,6 +35,7 @@ typedef struct
     char            text[MAX_VARS][128];
     int32_t         now;
     uint32_t        steps;              /* Actions run (a runaway loop stops) */
+    char            events[256];        /* What EMIT sent: "name=value;" ... */
 } page_t;
 
 static page_t* g_page;
@@ -402,6 +403,13 @@ static void run(page_t* p, dmvsi_handler_t h, uint32_t depth)
             case DMVSI_ACT_MOD: if (operand(p, x) != 0) p->num[x->var] %= operand(p, x); break;
             case DMVSI_ACT_MIN: if (operand(p, x) < p->num[x->var]) p->num[x->var] = operand(p, x); break;
             case DMVSI_ACT_MAX: if (operand(p, x) > p->num[x->var]) p->num[x->var] = operand(p, x); break;
+            case DMVSI_ACT_EMIT:
+            {
+                size_t l = strlen(p->events);
+                Dmod_SnPrintf(p->events + l, sizeof(p->events) - l, "%s=%d;", x->text,
+                              (int)((x->operand != 0) ? p->num[x->operand] : x->value));
+                break;
+            }
             default:
                 break;
         }
@@ -423,6 +431,32 @@ static void wait(page_t* p, int32_t ms)
                 run(p, h, 0);
         }
     }
+}
+
+/* The application sets a property: the variable of that name, then its change handlers */
+static bool app_sets(page_t* p, const char* name, int32_t number, const char* text)
+{
+    dmvsi_var_info_t info;
+    for (dmvsi_var_t v = 1; v < MAX_VARS && dmvsi_var_info(p->doc, v, &info) == 0; v++)
+    {
+        const char* prop = dmvsi_var_prop(p->doc, v);
+        if (prop == NULL || strcmp(prop, name) != 0)
+            continue;
+        if (info.kind == DMVSI_VAR_TEXT)
+            Dmod_SnPrintf(p->text[v], sizeof(p->text[0]), "%s", text);
+        else
+            p->num[v] = number;
+        dmvsi_var_t var;
+        dmvsi_handler_t h;
+        for (uint32_t i = 0; dmvsi_change_at(p->doc, i, &var, &h); i++)
+        {
+            if (var == v)
+                run(p, h, 0);
+        }
+        return true;
+    }
+    Dmod_Printf("    no property %s\n", name);
+    return false;
 }
 
 /* ---- Pages ---- */
@@ -893,6 +927,58 @@ DMOD_TEST_STEP(dmvs_js_evaluates_what_the_scripts_do_when_they_load)
     DMOD_TEST_EXPECT_TRUE(same);
     DMOD_TEST_EXPECT_EQ(g_created, 5u);
     DMOD_TEST_EXPECT_EQ(p->reports, 0u);
+}
+
+DMOD_TEST_STEP(dmvs_js_talks_to_the_application)
+{
+    const char* ids = "title=-|btn=pause|count=0";
+    page_t* p = page();
+    dmvs_js_compiler_t c = compiler_of(p, ids);
+    DMOD_TEST_EXPECT_TRUE(load(p, c,
+        "const first = dmod.prop('title', 'Neonowe Noce');\n"
+        "dmod.prop('player.playing', 1);\n"
+        "const t = document.getElementById('title');\n"
+        "const btn = document.getElementById('btn');\n"
+        "let clicks = 0;\n"
+        "t.innerText = first;\n"
+        "dmod.onchange('title', () => { t.innerText = dmod.get('title'); });\n"
+        "dmod.onchange('player.playing', () => { btn.innerText = dmod.get('player.playing') ? 'pause' : 'play'; });\n"
+        "btn.addEventListener('click', () => {\n"
+        "  clicks += 1;\n"
+        "  dmod.emit('toggle');\n"
+        "  dmod.emit('clicks', clicks);\n"
+        "  dmod.set('player.playing', dmod.get('player.playing') ? 0 : 1);\n"
+        "  document.getElementById('count').innerText = clicks;\n"
+        "});\n"));
+    DMOD_TEST_EXPECT_EQ(p->reports, 0u);
+    DMOD_TEST_EXPECT_TRUE(shows_is(p, "title", "Neonowe Noce"));
+
+    /* The application sets them: the view's handlers show it */
+    DMOD_TEST_EXPECT_TRUE(app_sets(p, "title", 0, "Midnight Drive"));
+    DMOD_TEST_EXPECT_TRUE(shows_is(p, "title", "Midnight Drive"));
+    DMOD_TEST_EXPECT_TRUE(app_sets(p, "player.playing", 0, NULL));
+    DMOD_TEST_EXPECT_TRUE(shows_is(p, "btn", "play"));
+
+    /* Events for it, in order, with their values; a property set by the view */
+    click(p, "btn");
+    click(p, "btn");
+    DMOD_TEST_EXPECT_EQ(strcmp(p->events, "toggle=0;clicks=1;toggle=0;clicks=2;"), 0);
+    DMOD_TEST_EXPECT_TRUE(shows_is(p, "count", "2"));
+    unload(p, c);
+
+    /* What it cannot know: names of the running view, a property not made */
+    p = page();
+    c = compiler_of(p, "x=");
+    Dmod_Printf("    (reports expected:)\n");
+    DMOD_TEST_EXPECT_TRUE(load(p, c,
+        "let k = 'a';\n"
+        "k = k + 'b';\n"
+        "document.getElementById('x').addEventListener('click', () => { k += 'c'; dmod.emit(k); });\n"
+        "dmod.onchange('nothing', () => {});\n"
+        "const missing = dmod.get('none');\n"
+        "const bad = dmod.prop('a b', 0);\n"));
+    DMOD_TEST_EXPECT_EQ(p->reports, 4u);
+    unload(p, c);
 }
 
 DMOD_TEST_STEP(dmvs_js_tells_what_a_value_is_one_of)
