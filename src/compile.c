@@ -667,6 +667,13 @@ static value_t select(compiler_t* c, const object_t* sel, const char* property)
     return r;
 }
 
+/* What the host is given: a value picked by a runtime index as the value it is (one of its choices) */
+static value_t for_host(compiler_t* c, const value_t* v)
+{
+    const object_t* sel = as_object(v, O_SELECT);
+    return (sel != NULL) ? select(c, sel, NULL) : *v;
+}
+
 /* Whether object.name is the host's: its object, or a variable that holds one (an integer, not a number's method) */
 static bool host_object(const value_t* v, const char* name)
 {
@@ -926,6 +933,7 @@ static value_t assign(compiler_t* c, scope_t* s, const node_t* target, uint8_t o
         }
         if (host_object(&object, name))
         {
+            v = for_host(c, &v);                    /* el.src = images[i] */
             if (c->host.set == NULL || c->host.set(c->host.ctx, (dmvs_js_compiler_t)c, &object, name, &v) != 0)
             {
                 char m[96];
@@ -1001,6 +1009,8 @@ static value_t call_expression(compiler_t* c, scope_t* s, const node_t* n)
     {
         /* The host's method */
         value_t out = v_undefined();
+        for (uint32_t i = 0; i < count; i++)
+            args[i] = for_host(c, &args[i]);
         if (c->host.call == NULL || c->host.call(c->host.ctx, (dmvs_js_compiler_t)c, &self, method, args, count, &out) != 0)
         {
             char m[96];
