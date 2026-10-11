@@ -21,7 +21,7 @@ target_link_libraries(${DMOD_MODULE_NAME} dmvs_js_if)
 
 # dmvsi: the documents the compiler writes, read back to run them
 dmod_link_modules(${DMOD_MODULE_NAME}
-    dmvsi@>=0.4
+    dmvsi@>=0.6
 )
 
 # Register the test module with ctest - this replays the same two steps CI

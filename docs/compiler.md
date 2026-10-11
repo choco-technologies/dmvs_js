@@ -76,6 +76,33 @@ aren't reported again, they aren't set (the element keeps its text),
 and an `if` on one takes neither branch. Examples are classes, `new`,
 `try`, labels, spreads, and comparisons of runtime texts.
 
+## Talking to the application: `dmod`
+
+A view is shown by an application (it claims a display for it); `dmod` is
+the channel between the two - dmview's properties and events:
+
+```js
+dmod.prop('title', 'Neonowe Noce');          // a property (text: a string initial, else an integer)
+dmod.prop('playing', 1);
+dmod.onchange('title', () => uiTitle.innerText = dmod.get('title'));
+playBtn.addEventListener('click', () => dmod.emit('toggle'));
+row.onclick = () => dmod.emit('select', 3);
+dmod.set('playing', 0);                      // the view sets one itself
+```
+
+- `dmod.prop(name, initial)` makes the property `name` (letters, digits,
+  `_`, `.`, `-`) and is its initial value - as in JavaScript, a `const` of
+  it keeps that value; `dmod.get(name)` is its value now.
+- `dmod.onchange(name, fn)` runs `fn` when the application changed it.
+- `dmod.emit(name, value)` sends the application an event with an integer
+  (0 without one).
+- `dmod.set(name, value)` sets a property from the view - the application
+  reads it, no change handler runs.
+
+Names are static texts, and a property is made before it is used. `dmod` is
+not run in a browser: a page gets it from a script file of its own
+(`<script src="dmod.js">`), which the conversion leaves out.
+
 ## An evaluator
 
 `dmvs_js_evaluator_new(&host)` runs the scripts' loading the way a
