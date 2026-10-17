@@ -867,10 +867,20 @@ static value_t dmod_prop(compiler_t* c, const value_t* args, uint32_t count)
         report(c, "dmod.prop() of an initial value known only when the view runs - not converted");
         return v_unknown();
     }
-    if (c->prop_count >= MAX_PROPS)
+    if (c->prop_count >= c->prop_capacity)
     {
-        report(c, "too many properties (dmod.prop) - not converted");
-        return v_unknown();
+        /* More room: twice as much, in the arena (what was is left there) */
+        uint32_t capacity = (c->prop_capacity != 0) ? 2U * c->prop_capacity : 32U;
+        struct prop* props = arena_alloc(&c->arena, capacity * sizeof(*props));
+        if (props == NULL)
+        {
+            report(c, "no memory for a property (dmod.prop) - not converted");
+            return v_unknown();
+        }
+        if (c->prop_count > 0)
+            memcpy(props, c->props, c->prop_count * sizeof(*props));
+        c->props = props;
+        c->prop_capacity = capacity;
     }
     i = (int)c->prop_count++;
     c->props[i].name = name;

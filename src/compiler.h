@@ -18,7 +18,6 @@
 #define MAX_ARGS        8u              /* Arguments of a call */
 #define MAX_NAMES       512u            /* Names the pre-scan keeps */
 #define MAX_SITES       32u             /* setTimeout / setInterval calls */
-#define MAX_PROPS       64u             /* dmod.prop() properties */
 #define MAX_SELECT      32u             /* Elements of an array a runtime index picks from */
 #define MAX_LOOPS       32u             /* Loops (and switches) nested */
 #define FIX             DMVS_JS_SCALE   /* The scale of numbers with fractions */
@@ -207,15 +206,16 @@ struct compiler
     bool            own_doc;            /* The document is the compiler's (an evaluator's scratch) */
     uint32_t        timers;             /* Evaluating: setTimeout / setInterval given out */
 
-    /* dmod.prop(): the properties of the view, by their names */
-    struct
+    /* dmod.prop(): the properties of the view, by their names - as many as the scripts make (the arena's) */
+    struct prop
     {
         const char* name;               /* The arena's */
         dmvsi_var_t var;
         uint8_t     type;               /* DMVS_JS_T_NUMBER (an integer) or _TEXT */
         value_t     initial;            /* Evaluating: what it is */
-    }               props[MAX_PROPS];
+    }*              props;
     uint32_t        prop_count;
+    uint32_t        prop_capacity;
     program_t*      programs;           /* Every piece of code seen (the pre-scan looks at all) - the compiler's */
 };
 
