@@ -981,6 +981,25 @@ DMOD_TEST_STEP(dmvs_js_talks_to_the_application)
     unload(p, c);
 }
 
+/* As many properties as the scripts make: a hundred rows of a list */
+DMOD_TEST_STEP(dmvs_js_makes_as_many_properties_as_there_are)
+{
+    page_t* p = page();
+    dmvs_js_compiler_t c = compiler_of(p, "");
+    DMOD_TEST_EXPECT_TRUE(load(p, c,
+        "for (let i = 0; i < 100; i++) {\n"
+        "  dmod.prop('row' + i + '.title', '');\n"
+        "  dmod.prop('row' + i + '.time', 0);\n"
+        "}\n"));
+    DMOD_TEST_EXPECT_EQ(p->reports, 0u);
+    uint32_t props = 0;
+    for (dmvsi_var_t v = 1; dmvsi_var_info(p->doc, v, &(dmvsi_var_info_t){ 0 }) == 0; v++)
+        props += (dmvsi_var_prop(p->doc, v) != NULL) ? 1U : 0U;
+    DMOD_TEST_EXPECT_EQ(props, 200u);
+    DMOD_TEST_EXPECT_TRUE(dmvsi_var_prop(p->doc, 1) != NULL);
+    unload(p, c);
+}
+
 DMOD_TEST_STEP(dmvs_js_tells_what_a_value_is_one_of)
 {
     const char* ids = "cover=|row=|next=";
